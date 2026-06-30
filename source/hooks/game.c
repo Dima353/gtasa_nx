@@ -100,6 +100,38 @@ static int GetEscapeJustDown_hook(void) {
   return 0;
 }
 
+// make resume load the latest save
+static int  (*CGenericGameStorage__CheckSlotDataValid)(int slot, int del);
+static void (*C_PcSave__GenerateGameFilename)(void *this, int slot, char *out);
+static uint64_t (*OS_FileGetDate)(int area, const char *path);
+static void *PcSaveHelper;   // points into game data segment at runtime
+static int  *lastSaveForResume;
+
+static int MainMenuScreen__HasCPSave(void) {
+  if (*lastSaveForResume == -1) {
+    uint64_t latest = 0;
+    for (int i = 0; i < 10; i++) {
+      char filename[256];
+      C_PcSave__GenerateGameFilename(&PcSaveHelper, i, filename);
+      uint64_t date = OS_FileGetDate(1, filename);
+      if (latest < date) {
+        latest = date;
+        *lastSaveForResume = i;
+      }
+    }
+  }
+  return CGenericGameStorage__CheckSlotDataValid(*lastSaveForResume, 1);
+}
+
+// support graceful exit
+static int (*SaveGameForPause)(int type, char *cmd);
+
+static int MainMenuScreen__OnExit(void) {
+  SaveGameForPause(3, NULL);
+  jni_quit_requested = 1;
+  return 0;
+}
+
 void patch_game(void) {
   // replace the NVThread JNI-thread spawner (NULL-faults on named threads)
   if (so_try_find_addr_rx(&game_mod, "_Z22NVThreadSpawnJNIThreadPlPK14pthread_attr_tPKcPFPvS5_ES5_"))
@@ -126,6 +158,44 @@ void patch_game(void) {
 
   // main-thread stack-guard TLS
   init_fake_tls(main_fake_tls);
+
+  // Ignore app rating popup
+  if (so_try_find_addr_rx(&game_mod, "_Z12Menu_ShowNagv"))
+    hook_arm64(so_find_addr(&game_mod, "_Z12Menu_ShowNagv"), (uintptr_t)ret0);
+
+  // Ignore side mission buttons (vigilante, paramedic, etc)
+  if (so_try_find_addr_rx(&game_mod, "_ZN25CWidgetButtonMissionStart6UpdateEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN25CWidgetButtonMissionStart6UpdateEv"),
+               (uintptr_t)ret0);
+  if (so_try_find_addr_rx(&game_mod, "_ZN26CWidgetButtonMissionCancel6UpdateEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN26CWidgetButtonMissionCancel6UpdateEv"),
+               (uintptr_t)ret0);
+  
+  // Ignore cloud saves
+  if (so_try_find_addr_rx(&game_mod, "UseCloudSaves"))
+    *(uint8_t *)so_find_addr(&game_mod, "UseCloudSaves") = 0;
+
+  // make resume load the latest save
+  CGenericGameStorage__CheckSlotDataValid =
+    (void *)so_find_addr_rx(&game_mod, "_ZN19CGenericGameStorage18CheckSlotDataValidEib");
+  C_PcSave__GenerateGameFilename =
+    (void *)so_find_addr_rx(&game_mod, "_ZN8C_PcSave20GenerateGameFilenameEiPc");
+  OS_FileGetDate =
+    (void *)so_find_addr_rx(&game_mod, "_Z14OS_FileGetDate14OSFileDataAreaPKc");
+  PcSaveHelper =
+    (void *)so_find_addr_rx(&game_mod, "PcSaveHelper");
+  lastSaveForResume =
+    (int *)so_find_addr_rx(&game_mod, "lastSaveForResume");
+  if (so_try_find_addr_rx(&game_mod, "_ZN14MainMenuScreen9HasCPSaveEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN14MainMenuScreen9HasCPSaveEv"),
+               (uintptr_t)MainMenuScreen__HasCPSave);
+
+  // support graceful exit
+  SaveGameForPause =
+    (void *)so_find_addr_rx(&game_mod, "_Z16SaveGameForPause10eSaveTypesPc");
+  if (so_try_find_addr_rx(&game_mod, "_ZN14MainMenuScreen6OnExitEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN14MainMenuScreen6OnExitEv"),
+               (uintptr_t)MainMenuScreen__OnExit);
 
   // pin the main/logic thread to core 0 (render = core 1, streaming/audio = core 2)
   set_thread_core(0);
