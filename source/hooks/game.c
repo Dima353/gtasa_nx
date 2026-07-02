@@ -132,6 +132,24 @@ static int MainMenuScreen__OnExit(void) {
   return 0;
 }
 
+// Emergency-vehicle / widescreen FOV fix.
+static float *CDraw__ms_fFOV;
+static float *CDraw__ms_fAspectRatio;
+// hidden (not static): referenced by fov_stub.s; hidden keeps adrp/add PIC-valid
+__attribute__((visibility("hidden"))) float fake_fov;
+
+static float CDraw__SetFOV(float fov) {
+  *CDraw__ms_fFOV =
+      (((*CDraw__ms_fAspectRatio - 1.3333f) * 11.0f) / 0.44444f) + fov;
+  fake_fov =
+      (((1.0f / *CDraw__ms_fAspectRatio - 1.3333f) * 11.0f) / 0.44444f) + fov;
+  return fake_fov;
+}
+
+// Half 2 of the FOV fix.
+__attribute__((visibility("hidden"))) uintptr_t ccamera_fov_ret;
+extern void CCamera__Process_fov_stub(void); // fov_stub.s
+
 void patch_game(void) {
   // replace the NVThread JNI-thread spawner (NULL-faults on named threads)
   if (so_try_find_addr_rx(&game_mod, "_Z22NVThreadSpawnJNIThreadPlPK14pthread_attr_tPKcPFPvS5_ES5_"))
@@ -196,6 +214,58 @@ void patch_game(void) {
   if (so_try_find_addr_rx(&game_mod, "_ZN14MainMenuScreen6OnExitEv"))
     hook_arm64(so_find_addr(&game_mod, "_ZN14MainMenuScreen6OnExitEv"),
                (uintptr_t)MainMenuScreen__OnExit);
+
+  // Fixed broken facial expressions
+  if (so_try_find_addr_rx(&game_mod,
+        "_Z27_rpSkinOpenGLPipelineCreate10RpSkinTypePFvP10RwResEntryPvhjE")) {
+    uint32_t *fn = (uint32_t *)so_find_addr(&game_mod,
+        "_Z27_rpSkinOpenGLPipelineCreate10RpSkinTypePFvP10RwResEntryPvhjE");
+    fn[0x328 / 4] = 0x52800081; // mov w1,  #4       (weight comps: 3 -> 4)
+    fn[0x32c / 4] = 0x52828062; // mov w2,  #0x1403  (GL_UNSIGNED_BYTE -> _SHORT)
+    fn[0x334 / 4] = 0x5280011c; // mov w28, #8       (stride advance: 4 -> 8)
+    fn[0x338 / 4] = 0x52800099; // mov w25, #4       (index comps: 3 -> 4)
+    fn[0x340 / 4] = 0x5280003a; // mov w26, #1       (short-format flag: 0 -> 1)
+  }
+
+  // Emergency-vehicle / widescreen FOV fix
+  if (so_try_find_addr_rx(&game_mod, "_ZN5CDraw6SetFOVEfb")) {
+    CDraw__ms_fFOV = (float *)so_find_addr_rx(&game_mod, "_ZN5CDraw7ms_fFOVE");
+    CDraw__ms_fAspectRatio =
+        (float *)so_find_addr_rx(&game_mod, "_ZN5CDraw15ms_fAspectRatioE");
+    hook_arm64(so_find_addr(&game_mod, "_ZN5CDraw6SetFOVEfb"),
+               (uintptr_t)CDraw__SetFOV);
+
+    // half 2
+    if (so_try_find_addr_rx(&game_mod, "_ZN7CCamera7ProcessEv")) {
+      ccamera_fov_ret =
+          so_find_addr_rx(&game_mod, "_ZN7CCamera7ProcessEv") + 0xDC8;
+      hook_arm64(so_find_addr(&game_mod, "_ZN7CCamera7ProcessEv") + 0xDB8,
+                 (uintptr_t)CCamera__Process_fov_stub);
+    }
+  }
+
+  // NOTE: "Nuke telemetry"
+  // Stop Android file/billing update callbacks
+  if (so_try_find_addr_rx(&game_mod, "_Z14AND_FileUpdated"))
+    hook_arm64(so_find_addr(&game_mod, "_Z14AND_FileUpdated"), (uintptr_t)ret0);
+  if (so_try_find_addr_rx(&game_mod, "_Z17AND_BillingUpdateb"))
+    hook_arm64(so_find_addr(&game_mod, "_Z17AND_BillingUpdateb"), (uintptr_t)ret0);
+
+  // No adjustable HUD (skip saving/repositioning of movable touch widgets)
+  if (so_try_find_addr_rx(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"),
+               (uintptr_t)ret0);
+  if (so_try_find_addr_rx(&game_mod, "_ZN15CTouchInterface27RepositionAdjustableWidgetsEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN15CTouchInterface27RepositionAdjustableWidgetsEv"),
+               (uintptr_t)ret0);
+
+  // IsRemovedTrack -> 0 (radio: don't treat tracks as removed)
+  if (so_try_find_addr_rx(&game_mod, "_Z14IsRemovedTracki"))
+    hook_arm64(so_find_addr(&game_mod, "_Z14IsRemovedTracki"), (uintptr_t)ret0);
+
+  // Disable touch-sense (rumble-on-touch) flag; data symbol, write 0
+  if (so_try_find_addr_rx(&game_mod, "UseTouchSense"))
+    *(uint8_t *)so_find_addr(&game_mod, "UseTouchSense") = 0;
 
   // pin the main/logic thread to core 0 (render = core 1, streaming/audio = core 2)
   set_thread_core(0);
