@@ -132,27 +132,16 @@ static void set_screen_size(int w, int h) {
 // ---------------------------------------------------------------------------
 // input: fed through the GameNative gamepad/touch entry points.
 //
-// implOnGamepadButtonDown/Up take a 0-15 button INDEX into the engine's 16-entry
-// ButtonContainer, NOT an Android keycode; any value >15 faults past the array.
-// Positional face buttons: Switch B = bottom = the "A" confirm button (index 0).
+// implOnGamepadButtonDown/Up take the engine's ButtonID (CHIDJoystick numbering),
+// NOT a raw 0-15 keycode. Correct IDs (from the mobile engine / gtasa_vita config.h,
+// verified against CHIDJoystickXbox360Standard's default map):
+//   CROSS=0 CIRCLE=1 SQUARE=2 TRIANGLE=3 START=4 SELECT=5 L1=6 R1=7
+//   DPAD_UP=8 DPAD_DOWN=9 DPAD_LEFT=10 DPAD_RIGHT=11 L3=12 R3=13; L2=68 R2=69.
+// L2/R2 (ZL/ZR) are ANALOG triggers reported via implOnGamepadAxesChanged (lt/rt),
+// so they are not in this digital table. Plus is reserved for the pause menu.
+// (The old table used a different numbering, which is why the d-pad/crouch were
+// mismapped.)
 // ---------------------------------------------------------------------------
-
-#define GPAD_A          0  // bottom face (confirm)
-#define GPAD_B          1  // right face (back)
-#define GPAD_X          2  // left face
-#define GPAD_Y          3  // top face
-#define GPAD_L1         4
-#define GPAD_R1         5
-#define GPAD_L2         6
-#define GPAD_R2         7
-#define GPAD_SELECT     8
-#define GPAD_START      9
-#define GPAD_THUMBL    10
-#define GPAD_THUMBR    11
-#define GPAD_DPAD_UP   12
-#define GPAD_DPAD_DOWN 13
-#define GPAD_DPAD_LEFT 14
-#define GPAD_DPAD_RIGHT 15
 
 typedef struct {
   u64 hid;
@@ -160,22 +149,19 @@ typedef struct {
 } PadMap;
 
 static const PadMap pad_map[] = {
-  { HidNpadButton_B, GPAD_A },
-  { HidNpadButton_A, GPAD_B },
-  { HidNpadButton_Y, GPAD_X },
-  { HidNpadButton_X, GPAD_Y },
-  { HidNpadButton_L, GPAD_L1 },
-  { HidNpadButton_R, GPAD_R1 },
-  { HidNpadButton_ZL, GPAD_L2 },
-  { HidNpadButton_ZR, GPAD_R2 },
-  { HidNpadButton_Up, GPAD_DPAD_UP },
-  { HidNpadButton_Down, GPAD_DPAD_DOWN },
-  { HidNpadButton_Left, GPAD_DPAD_LEFT },
-  { HidNpadButton_Right, GPAD_DPAD_RIGHT },
-  { HidNpadButton_StickL, GPAD_THUMBL },
-  { HidNpadButton_StickR, GPAD_THUMBR },
-  { HidNpadButton_Plus, GPAD_START },
-  { HidNpadButton_Minus, GPAD_SELECT },
+  { HidNpadButton_B,       0 },  // CROSS  (bottom face / confirm)
+  { HidNpadButton_A,       1 },  // CIRCLE (right face)
+  { HidNpadButton_Y,       2 },  // SQUARE (left face)
+  { HidNpadButton_X,       3 },  // TRIANGLE (top face)
+  { HidNpadButton_Minus,   5 },  // SELECT
+  { HidNpadButton_L,       6 },  // L1
+  { HidNpadButton_R,       7 },  // R1
+  { HidNpadButton_Up,      8 },  // DPAD_UP
+  { HidNpadButton_Down,    9 },  // DPAD_DOWN
+  { HidNpadButton_Left,   10 },  // DPAD_LEFT
+  { HidNpadButton_Right,  11 },  // DPAD_RIGHT
+  { HidNpadButton_StickL, 12 },  // L3
+  { HidNpadButton_StickR, 13 },  // R3
 };
 
 // GameNative entry points of libGame.so (Java_com_rockstargames_oswrapper_*).
@@ -360,6 +346,23 @@ static void dispatch_jni_callbacks(void) {
 static PadState pad;
 static u64 pad_prev = 0;
 
+// Cheat entry: open the Switch on-screen keyboard and feed the typed code to the
+// game's CCheat via cheats_enqueue (hooks/game.c). Blocks the main loop while the
+// keyboard is up (the render thread keeps presenting the last frame).
+static void open_cheat_keyboard(void) {
+  SwkbdConfig kbd;
+  if (R_FAILED(swkbdCreate(&kbd, 0)))
+    return;
+  swkbdConfigMakePresetDefault(&kbd);
+  swkbdConfigSetHeaderText(&kbd, "Enter cheat code");
+  swkbdConfigSetStringLenMax(&kbd, 63);
+  char out[64] = { 0 };
+  Result rc = swkbdShow(&kbd, out, sizeof(out));
+  swkbdClose(&kbd);
+  if (R_SUCCEEDED(rc) && out[0])
+    cheats_enqueue(out);
+}
+
 static void update_gamepad(void) {
   padUpdate(&pad);
   const u64 down = padGetButtons(&pad);
@@ -379,6 +382,11 @@ static void update_gamepad(void) {
   // '+' edge -> pause/escape (consumed by the GetEscapeJustDown hook)
   if ((changed & HidNpadButton_Plus) && (down & HidNpadButton_Plus))
     g_escape_pressed = 1;
+
+  // L3+R3 edge -> on-screen keyboard for cheat entry
+  const u64 cheat_combo = HidNpadButton_StickL | HidNpadButton_StickR;
+  if ((changed & cheat_combo) && (down & cheat_combo) == cheat_combo)
+    open_cheat_keyboard();
 
   pad_prev = down;
 
