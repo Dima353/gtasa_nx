@@ -20,6 +20,14 @@ void cpu_boost(int on);
 // process's allowed mask)
 void set_thread_core(int core);
 
+// Thread registry for a clean shutdown. Each engine worker thread records its own
+// kernel handle from its trampoline via thread_registry_add(); on exit the main
+// thread calls thread_registry_pause_others() to freeze them all so none is
+// executing engine/audio code while the process tears down (the mobile engine
+// never stops its own threads, so any exit otherwise faults a live worker).
+void thread_registry_add(void);
+void thread_registry_pause_others(void);
+
 int ret0(void);
 int retm1(void);
 

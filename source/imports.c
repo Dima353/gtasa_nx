@@ -75,6 +75,145 @@ static inline void *mc_thread_key(void) {
   return p;
 }
 
+// ---------------------------------------------------------------------------
+// GL redundant-state cache. RenderWare / GTA SA re-set the same GL state (blend,
+// depth, cull, texture bindings, active unit, program, ...) many times per frame.
+// On the Switch mesa/nouveau driver every GL call is expensive and the game is
+// CPU-bound on call count (GPU mostly idle), so drop calls that don't change
+// state. Correct because the engine renders through one GL context at a time (EGL
+// make-current transfers ownership): glc_reset() runs on every REAL eglMakeCurrent
+// so the cache is never trusted across a context switch, and glDelete{Textures,
+// Program} invalidate the bind caches so a reused id is never wrongly skipped.
+// Set glc_enabled = 0 for a pure pass-through if a rendering glitch is suspected.
+// ---------------------------------------------------------------------------
+static int glc_enabled = 1;
+
+#define GLC_MAXCAPS 24
+static struct { GLenum cap; GLboolean on; } glc_caps[GLC_MAXCAPS];
+static int glc_ncaps;
+
+static struct {
+  int have_blend;  GLenum bsf, bdf;
+  int have_dfunc;  GLenum dfunc;
+  int have_dmask;  GLboolean dmask;
+  int have_cull;   GLenum cull;
+  int have_front;  GLenum front;
+  int have_cmask;  GLboolean cr, cg, cb, ca;
+  int have_active; GLenum active;
+  int have_prog;   GLuint prog;
+  GLuint tex2d[8]; int have_tex2d[8];
+} glc;
+
+// Invalidate the cache. Called on every real eglMakeCurrent (context ownership
+// transfer) and once per frame from eglSwapBuffers_cache (so the wrapper's own
+// direct GL -- movie player, FPS overlay -- can't leave the cache stale).
+static void gl_state_cache_reset(void) {
+  glc_ncaps = 0;
+  memset(&glc, 0, sizeof(glc));
+}
+
+static void glEnable_c(GLenum cap) {
+  if (glc_enabled) {
+    for (int i = 0; i < glc_ncaps; i++)
+      if (glc_caps[i].cap == cap) {
+        if (glc_caps[i].on) return;
+        glc_caps[i].on = GL_TRUE; glEnable(cap); return;
+      }
+    if (glc_ncaps < GLC_MAXCAPS) {
+      glc_caps[glc_ncaps].cap = cap; glc_caps[glc_ncaps].on = GL_TRUE; glc_ncaps++;
+    }
+  }
+  glEnable(cap);
+}
+static void glDisable_c(GLenum cap) {
+  if (glc_enabled) {
+    for (int i = 0; i < glc_ncaps; i++)
+      if (glc_caps[i].cap == cap) {
+        if (!glc_caps[i].on) return;
+        glc_caps[i].on = GL_FALSE; glDisable(cap); return;
+      }
+    if (glc_ncaps < GLC_MAXCAPS) {
+      glc_caps[glc_ncaps].cap = cap; glc_caps[glc_ncaps].on = GL_FALSE; glc_ncaps++;
+    }
+  }
+  glDisable(cap);
+}
+static void glBlendFunc_c(GLenum s, GLenum d) {
+  if (glc_enabled && glc.have_blend && glc.bsf == s && glc.bdf == d) return;
+  glc.have_blend = 1; glc.bsf = s; glc.bdf = d;
+  glBlendFunc(s, d);
+}
+static void glBlendFuncSeparate_c(GLenum sc, GLenum dc, GLenum sa, GLenum da) {
+  glc.have_blend = 0; // don't reconcile with the glBlendFunc cache
+  glBlendFuncSeparate(sc, dc, sa, da);
+}
+static void glDepthFunc_c(GLenum f) {
+  if (glc_enabled && glc.have_dfunc && glc.dfunc == f) return;
+  glc.have_dfunc = 1; glc.dfunc = f;
+  glDepthFunc(f);
+}
+static void glDepthMask_c(GLboolean m) {
+  if (glc_enabled && glc.have_dmask && glc.dmask == m) return;
+  glc.have_dmask = 1; glc.dmask = m;
+  glDepthMask(m);
+}
+static void glCullFace_c(GLenum m) {
+  if (glc_enabled && glc.have_cull && glc.cull == m) return;
+  glc.have_cull = 1; glc.cull = m;
+  glCullFace(m);
+}
+static void glFrontFace_c(GLenum m) {
+  if (glc_enabled && glc.have_front && glc.front == m) return;
+  glc.have_front = 1; glc.front = m;
+  glFrontFace(m);
+}
+static void glColorMask_c(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
+  if (glc_enabled && glc.have_cmask && glc.cr == r && glc.cg == g &&
+      glc.cb == b && glc.ca == a)
+    return;
+  glc.have_cmask = 1; glc.cr = r; glc.cg = g; glc.cb = b; glc.ca = a;
+  glColorMask(r, g, b, a);
+}
+static void glActiveTexture_c(GLenum unit) {
+  if (glc_enabled && glc.have_active && glc.active == unit) return;
+  glc.have_active = 1; glc.active = unit;
+  glActiveTexture(unit);
+}
+static void glBindTexture_c(GLenum target, GLuint tex) {
+  if (glc_enabled && target == GL_TEXTURE_2D && glc.have_active) {
+    unsigned idx = (unsigned)(glc.active - GL_TEXTURE0);
+    if (idx < 8) {
+      if (glc.have_tex2d[idx] && glc.tex2d[idx] == tex) return;
+      glc.have_tex2d[idx] = 1; glc.tex2d[idx] = tex;
+    }
+  }
+  glBindTexture(target, tex);
+}
+static void glUseProgram_c(GLuint p) {
+  if (glc_enabled && glc.have_prog && glc.prog == p) return;
+  glc.have_prog = 1; glc.prog = p;
+  glUseProgram(p);
+}
+static void glDeleteTextures_c(GLsizei n, const GLuint *t) {
+  memset(glc.have_tex2d, 0, sizeof(glc.have_tex2d)); // a deleted bound tex must
+  glDeleteTextures(n, t);                            // not be skipped when reused
+}
+static void glDeleteProgram_c(GLuint p) {
+  if (glc.have_prog && glc.prog == p) glc.have_prog = 0;
+  glDeleteProgram(p);
+}
+
+// Frame boundary: invalidate the state cache once per frame, then run the real
+// swap hook. The wrapper's own direct GL there (movie player / FPS overlay) goes
+// around the cache, so this keeps the game's next frame from trusting a stale
+// entry. Kept in this TU so no cross-file symbol is needed. eglSwapBuffersHook is
+// defined in movie_player.c (already referenced by the import table below).
+extern unsigned int eglSwapBuffersHook(void *display, void *surface);
+static unsigned int eglSwapBuffers_cache(void *display, void *surface) {
+  gl_state_cache_reset();
+  return eglSwapBuffersHook(display, surface);
+}
+
 static EGLBoolean eglMakeCurrent_dedup(EGLDisplay dpy, EGLSurface draw,
                                        EGLSurface read, EGLContext ctx) {
   void *key = mc_thread_key();
@@ -89,6 +228,7 @@ static EGLBoolean eglMakeCurrent_dedup(EGLDisplay dpy, EGLSurface draw,
 
   EGLBoolean r = eglMakeCurrent(dpy, draw, read, ctx);
   if (r) {
+    gl_state_cache_reset(); // context/surface changed -> GL state cache is stale
     if (slot < 0) slot = (freeslot >= 0) ? freeslot : 0;
     g_mc[slot].key = key; g_mc[slot].dpy = dpy;
     g_mc[slot].draw = draw; g_mc[slot].read = read; g_mc[slot].ctx = ctx;
@@ -397,6 +537,7 @@ static void *pthread_trampoline(void *p) {
   void *arg = s->arg;
   // OS_ThreadLaunch threads (audio/stream) share core 2 (logic=0, render=1)
   set_thread_core(2);
+  thread_registry_add();            // track for freeze-on-exit
   memset(s->tls, 0, sizeof(s->tls));
   armSetTlsRw(s->tls);
   // tls stays in TPIDR_EL0 for the thread's lifetime, so PthreadStart is leaked
@@ -641,7 +782,7 @@ DynLibFunction dynlib_functions[] = {
   { "eglDestroyContext", (uintptr_t)&eglDestroyContext },
   { "eglMakeCurrent", (uintptr_t)&eglMakeCurrent_dedup },
   // hooked so the movie player can overlay video frames before each swap
-  { "eglSwapBuffers", (uintptr_t)&eglSwapBuffersHook },
+  { "eglSwapBuffers", (uintptr_t)&eglSwapBuffers_cache },
   { "eglSwapInterval", (uintptr_t)&eglSwapInterval },
   { "eglGetError", (uintptr_t)&eglGetError },
   { "eglTerminate", (uintptr_t)&eglTerminate },
@@ -729,46 +870,46 @@ DynLibFunction dynlib_functions[] = {
 
   { "getenv", (uintptr_t)&getenv },
 
-  { "glActiveTexture", (uintptr_t)&glActiveTexture },
+  { "glActiveTexture", (uintptr_t)&glActiveTexture_c },
   { "glAttachShader", (uintptr_t)&glAttachShader },
   { "glBindAttribLocation", (uintptr_t)&glBindAttribLocation },
   { "glBindBuffer", (uintptr_t)&glBindBuffer },
   { "glBindFramebuffer", (uintptr_t)&glBindFramebuffer },
   { "glBindRenderbuffer", (uintptr_t)&glBindRenderbuffer },
-  { "glBindTexture", (uintptr_t)&glBindTexture },
-  { "glBlendFunc", (uintptr_t)&glBlendFunc },
-  { "glBlendFuncSeparate", (uintptr_t)&glBlendFuncSeparate },
+  { "glBindTexture", (uintptr_t)&glBindTexture_c },
+  { "glBlendFunc", (uintptr_t)&glBlendFunc_c },
+  { "glBlendFuncSeparate", (uintptr_t)&glBlendFuncSeparate_c },
   { "glBufferData", (uintptr_t)&glBufferData_w },
   { "glCheckFramebufferStatus", (uintptr_t)&glCheckFramebufferStatus },
   { "glClear", (uintptr_t)&glClear },
   { "glClearColor", (uintptr_t)&glClearColor },
   { "glClearDepthf", (uintptr_t)&glClearDepthf },
   { "glClearStencil", (uintptr_t)&glClearStencil },
-  { "glColorMask", (uintptr_t)&glColorMask },
+  { "glColorMask", (uintptr_t)&glColorMask_c },
   { "glCompileShader", (uintptr_t)&glCompileShader },
   { "glCompressedTexImage2D", (uintptr_t)&glCompressedTexImage2D_w },
   { "glCreateProgram", (uintptr_t)&glCreateProgram },
   { "glCreateShader", (uintptr_t)&glCreateShader },
-  { "glCullFace", (uintptr_t)&glCullFace },
+  { "glCullFace", (uintptr_t)&glCullFace_c },
   { "glDeleteBuffers", (uintptr_t)&glDeleteBuffers },
   { "glDeleteFramebuffers", (uintptr_t)&glDeleteFramebuffers },
-  { "glDeleteProgram", (uintptr_t)&glDeleteProgram },
+  { "glDeleteProgram", (uintptr_t)&glDeleteProgram_c },
   { "glDeleteRenderbuffers", (uintptr_t)&glDeleteRenderbuffers },
   { "glDeleteShader", (uintptr_t)&glDeleteShader },
-  { "glDeleteTextures", (uintptr_t)&glDeleteTextures },
-  { "glDepthFunc", (uintptr_t)&glDepthFunc },
-  { "glDepthMask", (uintptr_t)&glDepthMask },
+  { "glDeleteTextures", (uintptr_t)&glDeleteTextures_c },
+  { "glDepthFunc", (uintptr_t)&glDepthFunc_c },
+  { "glDepthMask", (uintptr_t)&glDepthMask_c },
   { "glDepthRangef", (uintptr_t)&glDepthRangef },
-  { "glDisable", (uintptr_t)&glDisable },
+  { "glDisable", (uintptr_t)&glDisable_c },
   { "glDisableVertexAttribArray", (uintptr_t)&glDisableVertexAttribArray },
   { "glDrawArrays", (uintptr_t)&glDrawArrays },
   { "glDrawElements", (uintptr_t)&glDrawElements },
-  { "glEnable", (uintptr_t)&glEnable },
+  { "glEnable", (uintptr_t)&glEnable_c },
   { "glEnableVertexAttribArray", (uintptr_t)&glEnableVertexAttribArray },
   { "glFinish", (uintptr_t)&glFinish },
   { "glFramebufferRenderbuffer", (uintptr_t)&glFramebufferRenderbuffer },
   { "glFramebufferTexture2D", (uintptr_t)&glFramebufferTexture2D },
-  { "glFrontFace", (uintptr_t)&glFrontFace },
+  { "glFrontFace", (uintptr_t)&glFrontFace_c },
   { "glGenBuffers", (uintptr_t)&glGenBuffers },
   { "glGenFramebuffers", (uintptr_t)&glGenFramebuffers },
   { "glGenRenderbuffers", (uintptr_t)&glGenRenderbuffers },
@@ -804,7 +945,7 @@ DynLibFunction dynlib_functions[] = {
   { "glUniform4fv", (uintptr_t)&glUniform4fv },
   { "glUniformMatrix3fv", (uintptr_t)&glUniformMatrix3fv },
   { "glUniformMatrix4fv", (uintptr_t)&glUniformMatrix4fv },
-  { "glUseProgram", (uintptr_t)&glUseProgram },
+  { "glUseProgram", (uintptr_t)&glUseProgram_c },
   { "glVertexAttrib4fv", (uintptr_t)&glVertexAttrib4fv },
   { "glVertexAttribPointer", (uintptr_t)&glVertexAttribPointer },
   { "glViewport", (uintptr_t)&glViewport },

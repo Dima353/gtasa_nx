@@ -54,6 +54,7 @@ static int nv_thread_trampoline(void *arg) {
   void *(*func)(void *) = start->func;
   void *user_arg = start->arg;
   set_thread_core(start->core);     // spread engine threads across cores
+  thread_registry_add();            // track for freeze-on-exit
   init_fake_tls(start->tls);
   void *rc = func(user_arg);
   // tls stays in TPIDR_EL0 through teardown, so the block is leaked on purpose
@@ -128,12 +129,30 @@ static int MainMenuScreen__HasCPSave(void) {
 static int (*SaveGameForPause)(int type, char *cmd);
 
 static int MainMenuScreen__OnExit(void) {
+  // Stop the OpenAL mixer while it is still healthy so alcCloseDevice cleanly joins
+  // it (before __libnx_exit's __appExit tears down the audio service under it), then
+  // write the pause-save, then hand off to hard_exit (freeze remaining workers +
+  // return to the loader). Never returns.
+  deinit_openal();
   SaveGameForPause(3, NULL);
-  jni_quit_requested = 1;
+  hard_exit();
   return 0;
 }
 
-// Emergency-vehicle / widescreen FOV fix.
+// Add a "Quit" item to the pause menu.
+static void (*FlowScreen__AddItem)(void *self, const char *tex, const char *label,
+                                   void (*cb)(void));
+__attribute__((visibility("hidden"))) uintptr_t addallitems_cont;
+extern void MainMenuScreen__AddAllItems_orig(void *self); // mainmenu_exit_stub.s
+
+static void menu_exit_cb(void) { MainMenuScreen__OnExit(); }
+
+static void MainMenuScreen__AddAllItems(void *self) {
+  MainMenuScreen__AddAllItems_orig(self); // original items
+  FlowScreen__AddItem(self, "menu_mainquit", "FEP_QUI", menu_exit_cb);
+}
+
+// Emergency-vehicle / widescreen FOV fix
 static float *CDraw__ms_fFOV;
 static float *CDraw__ms_fAspectRatio;
 // hidden (not static): referenced by fov_stub.s; hidden keeps adrp/add PIC-valid
@@ -189,11 +208,11 @@ void radar_setup(void) {
 __attribute__((visibility("hidden"))) uintptr_t ccamera_fov_ret;
 extern void CCamera__Process_fov_stub(void); // fov_stub.s
 
-// Hydra camera fix
+// Hydra camera fix.
 __attribute__((visibility("hidden"))) uintptr_t ccam_ymov_ret;
 extern void CCam__FollowCar_ymov_stub(void); // ccam_ymov_stub.s
 
-// Hydra manual nozzle control
+// Hydra manual nozzle control.
 extern volatile float g_right_stick_y; // main.c: right stick Y in [-1,1], up<0
 __attribute__((visibility("hidden"))) uintptr_t cplane_nozzle_ret;
 extern void CPlane__nozzle_stub(void); // cplane_nozzle_stub.s
@@ -597,6 +616,17 @@ void patch_game(void) {
     hook_arm64(so_find_addr(&game_mod, "_ZN14MainMenuScreen6OnExitEv"),
                (uintptr_t)MainMenuScreen__OnExit);
 
+  // Add a "Quit" item to the pause menu.
+  if (so_try_find_addr_rx(&game_mod, "_ZN14MainMenuScreen11AddAllItemsEv") &&
+      so_try_find_addr_rx(&game_mod, "_ZN10FlowScreen7AddItemEPKcS1_PFvvE")) {
+    FlowScreen__AddItem =
+        (void *)so_find_addr_rx(&game_mod, "_ZN10FlowScreen7AddItemEPKcS1_PFvvE");
+    addallitems_cont =
+        so_find_addr_rx(&game_mod, "_ZN14MainMenuScreen11AddAllItemsEv") + 16;
+    hook_arm64(so_find_addr(&game_mod, "_ZN14MainMenuScreen11AddAllItemsEv"),
+               (uintptr_t)MainMenuScreen__AddAllItems);
+  }
+
   // Fixed broken facial expressions
   if (so_try_find_addr_rx(&game_mod,
         "_Z27_rpSkinOpenGLPipelineCreate10RpSkinTypePFvP10RwResEntryPvhjE")) {
@@ -609,7 +639,7 @@ void patch_game(void) {
     fn[0x340 / 4] = 0x5280003a; // mov w26, #1       (short-format flag: 0 -> 1)
   }
 
-  // Fix Second Siren
+  // Fix Second Siren.
   if (so_try_find_addr_rx(&game_mod, "_ZN8CVehicle19ProcessSirenAndHornEb")) {
     uint32_t *fn =
         (uint32_t *)so_find_addr(&game_mod, "_ZN8CVehicle19ProcessSirenAndHornEb");
@@ -617,7 +647,7 @@ void patch_game(void) {
     fn[0xD8 / 4] = 0xD503201F; // was: and x8, x8, #0xffff7fffffffffff (clear bit 47)
   }
 
-  // Heli/plane camera fix
+  // Heli/plane camera fix.
   {
     const uint32_t mov_x0_0 = 0xD2800000;
     if (so_try_find_addr_rx(&game_mod, "_ZN4CPad18AimWeaponLeftRightEP4CPedPb")) {
@@ -640,7 +670,7 @@ void patch_game(void) {
     }
   }
 
-  // Heli/plane camera fix
+  // Heli/plane camera fix.
   if (so_try_find_addr_rx(&game_mod,
                           "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb")) {
     ccam_ymov_ret =
@@ -653,12 +683,12 @@ void patch_game(void) {
                (uintptr_t)CCam__FollowCar_ymov_stub);
   }
 
-  // Hydra manual nozzle control
+  // Hydra manual nozzle control.
   if (so_try_find_addr_rx(&game_mod, "_ZN6CPlane20ProcessControlInputsEh")) {
     uint32_t *pci =
         (uint32_t *)so_find_addr(&game_mod, "_ZN6CPlane20ProcessControlInputsEh");
 
-    // Fully manual landing gear
+    // Fully manual landing gear: only the R3 toggle.
     //   +0x4A0: `b.ne 0x6ccc50` (airborne, gear!=0 -> button) -> unconditional `b`,
     //           so gear-down airborne also needs the button (no auto-retract).
     pci[0x4A0 / 4] = 0x17FFFFFA; // 0x54FFFF41 (b.ne) -> b -0x18
@@ -673,7 +703,7 @@ void patch_game(void) {
         (uintptr_t)CPlane__nozzle_stub);
   }
 
-  // Water physics fix
+  // Water physics fix.
   if (so_try_find_addr_rx(&game_mod, "_ZN15CTaskSimpleSwim25ProcessSwimmingResistanceEP4CPed")) {
     sw_GetAnim = (void *)so_find_addr_rx(&game_mod, "_Z30RpAnimBlendClumpGetAssociationP7RpClumpj");
     sw_ApplyMoveForce = (void *)so_find_addr_rx(&game_mod, "_ZN9CPhysical14ApplyMoveForceE7CVector");
@@ -684,8 +714,7 @@ void patch_game(void) {
                (uintptr_t)ProcessSwimmingResistance);
   }
 
-  // Cheats: overwrite the hash-key table with the PC codes and replace DoCheats
-  // with the queue pump (input from main.c's on-screen keyboard via cheats_enqueue).
+  // Cheats.
   if (so_try_find_addr_rx(&game_mod, "_ZN6CCheat8DoCheatsEv")) {
     CCheat__AddToCheatString =
         (void *)so_find_addr_rx(&game_mod, "_ZN6CCheat16AddToCheatStringEc");
@@ -695,14 +724,13 @@ void patch_game(void) {
                (uintptr_t)CCheat__DoCheats);
   }
 
-  // Controller remap: load the layout (built-in PSV default + optional controls.txt)
-  // and replace CHIDJoystick::AddMapping so every joystick built at runtime uses it.
+  // Controller remap.
   controls_load("controls.txt");
   if (so_try_find_addr_rx(&game_mod, "_ZN12CHIDJoystick10AddMappingEi10HIDMapping"))
     hook_arm64(so_find_addr(&game_mod, "_ZN12CHIDJoystick10AddMappingEi10HIDMapping"),
                (uintptr_t)CHIDJoystick__AddMapping);
 
-  // Emergency-vehicle / widescreen FOV fix
+  // Emergency-vehicle / widescreen FOV fix.
   if (so_try_find_addr_rx(&game_mod, "_ZN5CDraw6SetFOVEfb")) {
     CDraw__ms_fFOV = (float *)so_find_addr_rx(&game_mod, "_ZN5CDraw7ms_fFOVE");
     CDraw__ms_fAspectRatio =
@@ -710,12 +738,12 @@ void patch_game(void) {
     hook_arm64(so_find_addr(&game_mod, "_ZN5CDraw6SetFOVEfb"),
                (uintptr_t)CDraw__SetFOV);
 
-    // Radar fix
+    // Radar fix.
     if (so_try_find_addr_rx(&game_mod, "_ZN15CTouchInterface10m_pWidgetsE"))
       g_radar_mpw_base =
           so_find_addr_rx(&game_mod, "_ZN15CTouchInterface10m_pWidgetsE");
 
-    // Radar alpha fix
+    // Radar alpha fix.
     if (so_try_find_addr_rx(&game_mod, "_ZN4CHud9DrawRadarEv")) {
       drawradar_cont = so_find_addr_rx(&game_mod, "_ZN4CHud9DrawRadarEv") + 16;
       hook_arm64(so_find_addr(&game_mod, "_ZN4CHud9DrawRadarEv"),
@@ -737,7 +765,7 @@ void patch_game(void) {
   if (so_try_find_addr_rx(&game_mod, "_Z17AND_BillingUpdateb"))
     hook_arm64(so_find_addr(&game_mod, "_Z17AND_BillingUpdateb"), (uintptr_t)ret0);
 
-  // No adjustable HUD (skip saving/repositioning of movable touch widgets)
+  // No adjustable HUD.
   if (so_try_find_addr_rx(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"))
     hook_arm64(so_find_addr(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"),
                (uintptr_t)ret0);

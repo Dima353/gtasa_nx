@@ -417,6 +417,24 @@ static void update_gamepad(void) {
   }
 }
 
+// The mobile engine has no real shutdown path; its teardown (GL/audio static
+// destructors) crashes on Switch. Since the process is exiting anyway, skip all
+// cleanup: commit the SD so a just-written save persists, then terminate
+// immediately (like the Vita loader's sceKernelExitProcess). Never returns.
+void hard_exit(void) {
+  // The mobile engine never stops its own worker threads (unlike the HL2 port, whose
+  // engine returns with threads wound down). Freeze them so none is running engine/
+  // GPU/fs code while __libnx_exit's __appExit deinits those services.
+  thread_registry_pause_others();
+  // Return to the homebrew loader the way libnx does (and the HL2 port does): run
+  // libnx's own service cleanup and hand control back to hbl -> the forwarder, WITHOUT
+  // newlib atexit / C++ static destructors (the engine's crashy teardown). A hard
+  // svcExitProcess() instead terminates the whole forwarder process, which the
+  // forwarder reports as an error. Never returns.
+  extern void NX_NORETURN __libnx_exit(int rc);
+  __libnx_exit(0);
+}
+
 int main(void) {
   // full clock for boot; dropped once the menu has rendered
   cpu_boost(1);
@@ -550,16 +568,10 @@ int main(void) {
       svcSleepThread((frame_ticks - used) * 1000000000ULL / tick_freq);
   }
 
-  implOnPause(fake_env, NULL);
-  implOnSurfaceDestroyed(fake_env, NULL);
-  implOnActivityDestroyed(fake_env, NULL);
-
-  movie_stop();
-  deinit_openal();
-  socketExit();
-
-  extern void NX_NORETURN __libnx_exit(int rc);
-  __libnx_exit(0);
+  // Fallback for the JNI "quit"/"finish" path (which sets jni_quit_requested and
+  // lets the loop drain). The pause-menu Exit item calls hard_exit() synchronously
+  // from OnExit instead (matching the Vita loader), so it never reaches here.
+  hard_exit();
 
   return 0;
 }
