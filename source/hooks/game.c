@@ -157,6 +157,37 @@ static float CDraw__SetFOV(float fov) {
 __attribute__((visibility("hidden"))) uintptr_t ccamera_fov_ret;
 extern void CCamera__Process_fov_stub(void); // fov_stub.s
 
+// Hydra camera fix
+__attribute__((visibility("hidden"))) uintptr_t ccam_ymov_ret;
+extern void CCam__FollowCar_ymov_stub(void); // ccam_ymov_stub.s
+
+// Hydra manual nozzle control
+extern volatile float g_right_stick_y; // main.c: right stick Y in [-1,1], up<0
+__attribute__((visibility("hidden"))) uintptr_t cplane_nozzle_ret;
+extern void CPlane__nozzle_stub(void); // cplane_nozzle_stub.s
+
+// Rotate the Hydra thrust nozzles from the right-stick vertical axis.
+void CPlane__nozzle_manual(void *self, int pad) {
+  (void)pad;
+  const float sy = g_right_stick_y;
+  int16_t *noz = (int16_t *)((char *)self + 0xA88);
+  int16_t *prev = (int16_t *)((char *)self + 0xA8A);
+  int v = *noz;
+  const int step = 80;      // per frame; ~1-2 s for the full 0..5000 sweep
+  const float dz = 0.35f;   // stick deadzone (fraction of full deflection)
+  if (sy < -dz)             // stick up -> open nozzles (VTOL/hover)
+    v -= step;
+  else if (sy > dz)         // stick down -> close nozzles (forward flight)
+    v += step;
+  else
+    return; // inside deadzone: hold current angle
+  if (v < 0) v = 0;
+  else if (v > 5000) v = 5000;
+  *prev = *noz;
+  *noz = (int16_t)v;
+}
+
+
 // Water physics fix
 typedef struct { float x, y, z; } SwVec;
 
@@ -555,6 +586,62 @@ void patch_game(void) {
     fn[0xD8 / 4] = 0xD503201F; // was: and x8, x8, #0xffff7fffffffffff (clear bit 47)
   }
 
+  // Heli/plane camera fix
+  {
+    const uint32_t mov_x0_0 = 0xD2800000;
+    if (so_try_find_addr_rx(&game_mod, "_ZN4CPad18AimWeaponLeftRightEP4CPedPb")) {
+      uint32_t *fn = (uint32_t *)so_find_addr(
+          &game_mod, "_ZN4CPad18AimWeaponLeftRightEP4CPedPb");
+      fn[0x6c / 4] = mov_x0_0;
+    }
+    if (so_try_find_addr_rx(&game_mod, "_ZN4CPad15AimWeaponUpDownEP4CPedPb")) {
+      uint32_t *fn = (uint32_t *)so_find_addr(
+          &game_mod, "_ZN4CPad15AimWeaponUpDownEP4CPedPb");
+      fn[0x60 / 4] = mov_x0_0;
+    }
+    if (so_try_find_addr_rx(&game_mod,
+                            "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb")) {
+      uint32_t *fn = (uint32_t *)so_find_addr(
+          &game_mod, "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb");
+      fn[0x62c / 4] = mov_x0_0;  // block @+0x62c
+      fn[0x1138 / 4] = mov_x0_0; // block @+0x1138
+      fn[0x156c / 4] = mov_x0_0; // block @+0x156c (skip the 4th @+0x1240)
+    }
+  }
+
+  // Heli/plane camera fix
+  if (so_try_find_addr_rx(&game_mod,
+                          "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb")) {
+    ccam_ymov_ret =
+        so_find_addr_rx(&game_mod,
+                        "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb") +
+        0xF74;
+    hook_arm64(so_find_addr(&game_mod,
+                            "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb") +
+                   0xF60,
+               (uintptr_t)CCam__FollowCar_ymov_stub);
+  }
+
+  // Hydra manual nozzle control
+  if (so_try_find_addr_rx(&game_mod, "_ZN6CPlane20ProcessControlInputsEh")) {
+    uint32_t *pci =
+        (uint32_t *)so_find_addr(&game_mod, "_ZN6CPlane20ProcessControlInputsEh");
+
+    // Fully manual landing gear
+    //   +0x4A0: `b.ne 0x6ccc50` (airborne, gear!=0 -> button) -> unconditional `b`,
+    //           so gear-down airborne also needs the button (no auto-retract).
+    pci[0x4A0 / 4] = 0x17FFFFFA; // 0x54FFFF41 (b.ne) -> b -0x18
+    //   +0x484: `b.eq 0x6ccc6c` (near ground, gear==1.0 -> auto-deploy) -> NOP,
+    //           so gear-up near-ground falls to the button path (no auto-deploy).
+    pci[0x484 / 4] = 0xD503201F; // 0x54000100 (b.eq) -> NOP
+
+    cplane_nozzle_ret =
+        so_find_addr_rx(&game_mod, "_ZN6CPlane20ProcessControlInputsEh") + 0x784;
+    hook_arm64(
+        so_find_addr(&game_mod, "_ZN6CPlane20ProcessControlInputsEh") + 0x5D4,
+        (uintptr_t)CPlane__nozzle_stub);
+  }
+
   // Water physics fix
   if (so_try_find_addr_rx(&game_mod, "_ZN15CTaskSimpleSwim25ProcessSwimmingResistanceEP4CPed")) {
     sw_GetAnim = (void *)so_find_addr_rx(&game_mod, "_Z30RpAnimBlendClumpGetAssociationP7RpClumpj");
@@ -606,17 +693,6 @@ void patch_game(void) {
     hook_arm64(so_find_addr(&game_mod, "_Z14AND_FileUpdated"), (uintptr_t)ret0);
   if (so_try_find_addr_rx(&game_mod, "_Z17AND_BillingUpdateb"))
     hook_arm64(so_find_addr(&game_mod, "_Z17AND_BillingUpdateb"), (uintptr_t)ret0);
-
-  // Sprinting on any surface is allowed  [OBSERVABLE: sprint on sand/grass
-  // without slowing down]
-  if (so_try_find_addr_rx(&game_mod, "_ZN14SurfaceInfos_c12CantSprintOnEj"))
-    hook_arm64(so_find_addr(&game_mod, "_ZN14SurfaceInfos_c12CantSprintOnEj"),
-               (uintptr_t)ret0);
-
-  // Remove the "ExtraAirResistance" flag  [OBSERVABLE: player movement feel]
-  if (so_try_find_addr_rx(&game_mod, "_ZN10CCullZones29DoExtraAirResistanceForPlayerEv"))
-    hook_arm64(so_find_addr(&game_mod, "_ZN10CCullZones29DoExtraAirResistanceForPlayerEv"),
-               (uintptr_t)ret0);
 
   // No adjustable HUD (skip saving/repositioning of movable touch widgets)
   if (so_try_find_addr_rx(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"))

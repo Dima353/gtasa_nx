@@ -47,6 +47,11 @@ int g_hide_saves_frames = 0;           // auto-clear countdown
 // by the CPad::GetEscapeJustDown hook in hooks/game.c.
 volatile int g_escape_pressed = 0;
 
+// Right analog stick Y in [-1, 1] (up = negative, Android convention). Published
+// each poll from update_gamepad and read by the Hydra nozzle control in
+// hooks/game.c -- a clean, known-range signal, unlike the engine's scaled pad.
+volatile float g_right_stick_y = 0.0f;
+
 // provide replacement heap init function to separate newlib heap from the .so
 void __libnx_initheap(void) {
   void *addr;
@@ -153,6 +158,7 @@ static const PadMap pad_map[] = {
   { HidNpadButton_A,       1 },  // CIRCLE (right face)
   { HidNpadButton_Y,       2 },  // SQUARE (left face)
   { HidNpadButton_X,       3 },  // TRIANGLE (top face)
+  { HidNpadButton_Plus,    4 },  // START (menu accept / resume; open is via g_escape)
   { HidNpadButton_Minus,   5 },  // SELECT
   { HidNpadButton_L,       6 },  // L1
   { HidNpadButton_R,       7 },  // R1
@@ -399,6 +405,7 @@ static void update_gamepad(void) {
   const float ly = (float)ls.y * -scale;
   const float rx = (float)rs.x * scale;
   const float ry = (float)rs.y * -scale;
+  g_right_stick_y = ry; // publish for the Hydra nozzle control (hooks/game.c)
   const float lt = (down & HidNpadButton_ZL) ? 1.0f : 0.0f;
   const float rt = (down & HidNpadButton_ZR) ? 1.0f : 0.0f;
 
