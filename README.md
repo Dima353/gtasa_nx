@@ -27,7 +27,7 @@ To install:
    * the contents of the OBB (`main.*.obb` — it is just a ZIP; the `data/`,
      `models/`, `texdb/`, `audio/`, `text/`, `anim/`, `es2/`, … trees inside it
      go directly in `/switch/gtasa/`).
-4. Copy `gtasa_nx.nro` and `controls.txt` into `/switch/gtasa/`.
+4. Copy `gtasa_nx.nro` into `/switch/gtasa/`.
 
 Your SD card should end up with at least `/switch/gtasa/gtasa_nx.nro`,
 `/switch/gtasa/libGame.so`, `/switch/gtasa/libc++_shared.so`, and the extracted
@@ -50,8 +50,12 @@ The port has a config file at `/switch/gtasa/config.txt`, created on first run:
   handheld and 1920x1080 docked
 * `trilinear_filter` — `1` forces trilinear texture filtering
 * `show_fps` — `1` draws a small FPS counter in the top-left corner
-* `ps2_corona_rotation` — `1` 
-* `ps2_color_filter` — `1`
+* `ps2_corona_rotation` — `1` PS2 Corona Sun
+* `ps2_color_filter` — `1` PS2 Color filter
+* `sprint_any_surface` — `0` Sprinting on any surface is allowed
+* `remove_air_resistance` — `0` Remove "ExtraAirResistance" flag
+* `show_wanted_stars` — `0` Always drawable wanted stars
+* `disable_ped_spec` — `1` Removed specular lighting on pedestrians
 ### How to build
 
 You're going to need devkitA64 and the following packages/libraries:
