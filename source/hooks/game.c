@@ -296,6 +296,15 @@ void radar_setup(void) {
 __attribute__((visibility("hidden"))) uintptr_t ccamera_fov_ret;
 extern void CCamera__Process_fov_stub(void); // fov_stub.s
 
+// PS2-style corona rotation (see corona_ps2_stub.s). Ported from JPatch
+__attribute__((visibility("hidden"))) uintptr_t corona_ps2_ret;
+extern void CCoronas__Render_ps2corona_stub(void); // corona_ps2_stub.s
+
+// PS2 color filter (see colorfilter_ps2_stub.s).
+__attribute__((visibility("hidden"))) uintptr_t colorfilter_ret_fall; // +0x624
+__attribute__((visibility("hidden"))) uintptr_t colorfilter_ret_ne;   // +0x6b0
+extern void CPostEffects__MobileRender_ps2filter_stub(void); // colorfilter_ps2_stub.s
+
 // Hydra camera fix.
 __attribute__((visibility("hidden"))) uintptr_t ccam_ymov_ret;
 extern void CCam__FollowCar_ymov_stub(void); // ccam_ymov_stub.s
@@ -594,12 +603,40 @@ static const struct { const char *n; int v; } remap_buttons[] = {
   {"BUTTON_R3",13},{"BUTTON_L2",68},{"BUTTON_R2",69},
 };
 
+// Write the current g_remap (built-in PSV defaults) out as an editable controls.txt,
+// in the exact format controls_load parses, so users get a self-documenting template.
+static void controls_write(const char *path) {
+  FILE *f = fopen(path, "w");
+  if (!f) return;
+  fputs("# GTA:SA NX controller remap -- auto-generated defaults.\n"
+        "# Format: MAPPING_ACTION BUTTON_NAME  (one per line; ';' or '#' = comment).\n"
+        "# Buttons: BUTTON_CROSS CIRCLE SQUARE TRIANGLE START SELECT L1 R1 L3 R3 L2 R2,\n"
+        "#          DPAD_UP DPAD_DOWN DPAD_LEFT DPAD_RIGHT, BUTTON_UNUSED.\n"
+        "# Edit a line to remap; delete it to keep the built-in default.\n\n",
+        f);
+  for (unsigned i = 0; i < sizeof(remap_actions) / sizeof(*remap_actions); i++) {
+    int bv = g_remap[remap_actions[i].v];
+    if (bv == REMAP_UNSET)
+      continue;
+    const char *bn = NULL;
+    for (unsigned j = 0; j < sizeof(remap_buttons) / sizeof(*remap_buttons); j++)
+      if (remap_buttons[j].v == bv) { bn = remap_buttons[j].n; break; }
+    if (bn)
+      fprintf(f, "%-40s %s\n", remap_actions[i].n, bn);
+  }
+  fclose(f);
+}
+
 // Load overrides from a text file: "MAPPING_XXX BUTTON_YYY" or "MAPPING_XXX=BUTTON_YYY"
-// per line (';'/'#' comments). Absent file -> built-in PSV defaults stand.
+// per line (';'/'#' comments). Absent file -> write out the built-in PSV defaults as
+// an editable template, then use those defaults.
 static void controls_load(const char *path) {
   controls_defaults();
   FILE *f = fopen(path, "r");
-  if (!f) return;
+  if (!f) {
+    controls_write(path);
+    return;
+  }
   char line[256], a[64], b[64];
   while (fgets(line, sizeof(line), f)) {
     if (line[0] == ';' || line[0] == '#') continue;
@@ -637,6 +674,28 @@ static void CHIDJoystick__AddMapping(void *self, int buttonId, int action) {
   *(int *)(e + 4) = action;
   memset(e + 8, 0, 12);
   *(int *)((char *)self + 12) = cnt + 1;
+}
+
+// Return the fog.
+static float *g_emu_fogdistances;  // [min, max, 1/(max-min)]
+static float *g_emu_fogcolor;      // [r, g, b]
+static uint8_t *g_emu_fogdirty;
+static void emu_DistanceFogSetup_fogwall(float minD, float maxD, float r, float g,
+                                         float b) {
+  minD *= 0.8f;
+  maxD *= 0.95f;
+  if (g_emu_fogdistances[0] != minD || g_emu_fogdistances[1] != maxD) {
+    g_emu_fogdistances[0] = minD;
+    g_emu_fogdistances[1] = maxD;
+    g_emu_fogdistances[2] = 1.0f / (maxD - minD);
+    *g_emu_fogdirty = 1;
+  }
+  if (g_emu_fogcolor[0] != r || g_emu_fogcolor[1] != g || g_emu_fogcolor[2] != b) {
+    g_emu_fogcolor[0] = r;
+    g_emu_fogcolor[1] = g;
+    g_emu_fogcolor[2] = b;
+    *g_emu_fogdirty = 1;
+  }
 }
 
 void patch_game(void) {
@@ -916,11 +975,81 @@ void patch_game(void) {
     }
   }
 
+  // PS2-style corona rotation (JPatch PS2CoronaRotation).
+  if (config.ps2_corona_rotation &&
+      so_try_find_addr_rx(&game_mod, "_ZN8CCoronas6RenderEv")) {
+    corona_ps2_ret = so_find_addr_rx(&game_mod, "_ZN8CCoronas6RenderEv") + 0x414;
+    hook_arm64(so_find_addr(&game_mod, "_ZN8CCoronas6RenderEv") + 0x404,
+               (uintptr_t)CCoronas__Render_ps2corona_stub);
+  }
+
+  if (config.ps2_color_filter &&
+      so_try_find_addr_rx(&game_mod, "_ZN12CPostEffects12MobileRenderEv")) {
+    uintptr_t mr = so_find_addr_rx(&game_mod, "_ZN12CPostEffects12MobileRenderEv");
+    colorfilter_ret_fall = mr + 0x624;
+    colorfilter_ret_ne = mr + 0x6b0;
+    hook_arm64(so_find_addr(&game_mod, "_ZN12CPostEffects12MobileRenderEv") + 0x614,
+               (uintptr_t)CPostEffects__MobileRender_ps2filter_stub);
+  }
+
   // Stop Android file/billing update callbacks
   if (so_try_find_addr_rx(&game_mod, "_Z14AND_FileUpdated"))
     hook_arm64(so_find_addr(&game_mod, "_Z14AND_FileUpdated"), (uintptr_t)ret0);
   if (so_try_find_addr_rx(&game_mod, "_Z17AND_BillingUpdateb"))
     hook_arm64(so_find_addr(&game_mod, "_Z17AND_BillingUpdateb"), (uintptr_t)ret0);
+
+  // Sprinting on any surface is allowed.
+  if (config.sprint_any_surface &&
+      so_try_find_addr_rx(&game_mod, "_ZN14SurfaceInfos_c12CantSprintOnEj"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN14SurfaceInfos_c12CantSprintOnEj"),
+               (uintptr_t)ret0);
+
+  // Remove the "ExtraAirResistance" flag.
+  if (config.remove_air_resistance &&
+      so_try_find_addr_rx(&game_mod, "_ZN10CCullZones29DoExtraAirResistanceForPlayerEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN10CCullZones29DoExtraAirResistanceForPlayerEv"),
+               (uintptr_t)ret0);
+
+  // Aim the Country Rifle in 3rd person instead of the scope.
+  if (so_try_find_addr_rx(&game_mod,
+                          "_ZN23CTaskSimplePlayerOnFoot19ProcessPlayerWeaponEP10CPlayerPed")) {
+    uint32_t *ppw = (uint32_t *)so_find_addr(
+        &game_mod,
+        "_ZN23CTaskSimplePlayerOnFoot19ProcessPlayerWeaponEP10CPlayerPed");
+    ppw[0x194 / 4] = 0xD503201Fu; // NOP b.eq -> scope (site 1)
+    ppw[0x784 / 4] = 0xD503201Fu; // NOP b.eq -> scope (site 2)
+  }
+
+  // CJ magnets to stealable objects only when very close.
+  if (so_try_find_addr_rx(&game_mod, "_ZN11CPlayerInfo17FindObjectToStealEP4CPed")) {
+    uint32_t *fots = (uint32_t *)so_find_addr(
+        &game_mod, "_ZN11CPlayerInfo17FindObjectToStealEP4CPed");
+    fots[0x15c / 4] = 0x1e2e1001u; // fmov s1, #1.0 (was #2.25)
+  }
+
+  // Always draw the wanted-level stars (config-gated, default off).
+  if (config.show_wanted_stars &&
+      so_try_find_addr_rx(&game_mod, "_ZN17CWidgetPlayerInfo10DrawWantedEv")) {
+    uint32_t *dw = (uint32_t *)so_find_addr(
+        &game_mod, "_ZN17CWidgetPlayerInfo10DrawWantedEv");
+    dw[0x58 / 4] = 0x14000008u; // b 0x351628 (skip the "should we draw?" check)
+  }
+
+  // Return the fog.
+  if (so_try_find_addr_rx(&game_mod, "_Z20emu_DistanceFogSetupfffff")) {
+    g_emu_fogdistances = (float *)so_find_addr_rx(&game_mod, "emu_fogdistances");
+    g_emu_fogcolor = (float *)so_find_addr_rx(&game_mod, "emu_fogcolor");
+    g_emu_fogdirty = (uint8_t *)so_find_addr_rx(&game_mod, "emu_fogdirty");
+    hook_arm64(so_find_addr(&game_mod, "_Z20emu_DistanceFogSetupfffff"),
+               (uintptr_t)emu_DistanceFogSetup_fogwall);
+  }
+
+  // Remove the specular "shine" WarDrum added to peds/characters.
+  if (config.disable_ped_spec &&
+      so_try_find_addr_rx(&game_mod, "_Z16BuildPixelSourcej")) {
+    uint32_t *bps = (uint32_t *)so_find_addr(&game_mod, "_Z16BuildPixelSourcej");
+    bps[0x244 / 4] = 0x2a1603e8u; // mov w8, w22  (was: add w8, w22, #0x180)
+  }
 
   // No adjustable
   if (so_try_find_addr_rx(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"))

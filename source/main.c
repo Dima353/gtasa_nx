@@ -26,6 +26,7 @@
 #include "imports.h"
 #include "jni_fake.h"
 #include "movie_player.h"
+#include "settings_menu.h"
 
 static void *heap_so_base = NULL;
 static size_t heap_so_limit = 0;
@@ -461,6 +462,10 @@ int main(void) {
 
   if (read_config(CONFIG_NAME) < 0)
     write_config(CONFIG_NAME);
+
+  // Hold ZR at launch to open the mod-settings menu (libnx console). Runs before
+  // patch_game() so toggles apply this same boot. No-op unless ZR is held.
+  settings_menu_maybe_show();
 
   check_syscalls();
   check_data();

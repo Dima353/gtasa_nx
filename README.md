@@ -50,7 +50,8 @@ The port has a config file at `/switch/gtasa/config.txt`, created on first run:
   handheld and 1920x1080 docked
 * `trilinear_filter` — `1` forces trilinear texture filtering
 * `show_fps` — `1` draws a small FPS counter in the top-left corner
-
+* `ps2_corona_rotation` — `1` 
+* `ps2_color_filter` — `1`
 ### How to build
 
 You're going to need devkitA64 and the following packages/libraries:

@@ -40,6 +40,14 @@ typedef struct {
   int screen_height;
   int trilinear_filter;
   int show_fps;
+  // PS2-style rendering (SkyGFX-derived) toggles. Each 1 = on, 0 = off.
+  int ps2_corona_rotation; // #1: coronas spin like PS2/PC
+  int ps2_color_filter;    // #3: PS2 color-grade filter in CPostEffects::MobileRender
+  // Gameplay-feel fixes (Vita Category A). 1 = fix applied, 0 = stock. Default 0.
+  int sprint_any_surface;    // SurfaceInfos_c::CantSprintOn -> ret0 (sprint on sand/grass)
+  int remove_air_resistance; // CCullZones::DoExtraAirResistanceForPlayer -> ret0
+  int show_wanted_stars;     // CWidgetPlayerInfo::DrawWanted: always draw the stars
+  int disable_ped_spec;      // BuildPixelSource: drop BONE3|BONE4 from the spec gate
 } Config;
 
 extern Config config;
