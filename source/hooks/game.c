@@ -102,6 +102,94 @@ static int GetEscapeJustDown_hook(void) {
   return 0;
 }
 
+// Hydraulics camera fix.
+extern volatile int g_r3_down, g_l3_down, g_dpad_down; // main.c
+__attribute__((visibility("hidden"))) int g_hydraulics_camera = 0; // 0=tilt 1=camera
+__attribute__((visibility("hidden"))) uintptr_t hyd_freeze_ret, hyd_cont_ret;
+__attribute__((visibility("hidden"))) uintptr_t aim_lr_early, aim_lr_cont;
+__attribute__((visibility("hidden"))) uintptr_t aim_ud_early, aim_ud_cont;
+__attribute__((visibility("hidden"))) uintptr_t chid_getinputtype;
+extern void hyd_freeze_stub(void); // hydraulics_stub.s
+extern void aim_lr_stub(void);
+extern void aim_ud_stub(void);
+
+static int CPad__GetHydraulicJump(void *this) {
+  if (*(uint16_t *)((uint8_t *)this + 0x110) != 0)
+    return 0;
+  // R3 (without L3, so the L3+R3 cheat combo doesn't also flip it) toggles the mode.
+  // Edge-detect here: HydraulicControl is the only caller, so this runs each frame
+  // only while in a hydraulics car -- R3 elsewhere is untouched.
+  static int prev = 0;
+  int now = g_r3_down && !g_l3_down;
+  if (now && !prev)
+    g_hydraulics_camera = !g_hydraulics_camera;
+  prev = now;
+  return g_hydraulics_camera; // 1 -> HydraulicControl skips the tilt read
+}
+
+// Free-aim binding.
+static int g_free_aim = 0;
+__attribute__((visibility("hidden"))) uintptr_t faim_ret_shift, faim_ret_else;
+__attribute__((visibility("hidden"))) uintptr_t findlock_cont;
+extern void free_aim_stub(void); // free_aim_stub.s
+extern void FindWeaponLockOnTarget_orig(void *this); // free_aim_stub.s trampoline
+static void (*CPlayerPed__ClearWeaponTarget)(void *playerPed);
+static void (*CEntity__CleanUpOldReference)(void *entity, void **ref);
+static int  (*CGameLogic__IsCoopGameGoingOn)(void);
+static int  (*CHID__GetInputType)(void);
+static void *MobileSettings_settings;
+
+// Called from free_aim_stub.s when a lock-on target exists but isn't being cycled.
+__attribute__((visibility("hidden"))) void free_aim_maybe(void *playerPed) {
+  static int prev = 0;
+  int now = g_dpad_down;
+  if (now && !prev) {
+    g_free_aim = 1;
+    CPlayerPed__ClearWeaponTarget(playerPed);
+  }
+  prev = now;
+}
+
+static int MobileSettings__IsFreeAimMode(void *this) {
+  (void)this;
+  if (g_free_aim)
+    return 1;
+  if (CHID__GetInputType() == 1) // stock: input type 1 -> not free aim
+    return 0;
+  if (*(int *)((uint8_t *)MobileSettings_settings + 256) != 1)
+    return 0;
+  return CGameLogic__IsCoopGameGoingOn() ? 0 : 1;
+}
+
+static int MobileSettings__IsLockOnMode(void *this) {
+  (void)this;
+  if (g_free_aim)
+    return 0;
+  if (CHID__GetInputType() == 1) // stock: input type 1 -> lock on
+    return 1;
+  if (*(int *)((uint8_t *)MobileSettings_settings + 256) == 0)
+    return 1;
+  return CGameLogic__IsCoopGameGoingOn();
+}
+
+// While free aim is active, don't let the engine re-acquire a lock target.
+static void CPlayerPed__FindWeaponLockOnTarget(void *this) {
+  if (g_free_aim)
+    return;
+  FindWeaponLockOnTarget_orig(this);
+}
+
+// Clears the free-aim latch when aiming ends, then does the stock cleanup (release
+// the 3rd-person target reference at this+0x988).
+static void CPlayerPed__Clear3rdPersonMouseTarget(void *this) {
+  g_free_aim = 0;
+  void **ref = (void **)((uint8_t *)this + 0x988);
+  if (*ref != NULL) {
+    CEntity__CleanUpOldReference(*ref, ref);
+    *ref = NULL;
+  }
+}
+
 // make resume load the latest save
 static int  (*CGenericGameStorage__CheckSlotDataValid)(int slot, int del);
 static void (*C_PcSave__GenerateGameFilename)(void *this, int slot, char *out);
@@ -152,7 +240,7 @@ static void MainMenuScreen__AddAllItems(void *self) {
   FlowScreen__AddItem(self, "menu_mainquit", "FEP_QUI", menu_exit_cb);
 }
 
-// Emergency-vehicle / widescreen FOV fix
+// Emergency-vehicle / widescreen FOV fix.
 static float *CDraw__ms_fFOV;
 static float *CDraw__ms_fAspectRatio;
 // hidden (not static): referenced by fov_stub.s; hidden keeps adrp/add PIC-valid
@@ -670,6 +758,75 @@ void patch_game(void) {
     }
   }
 
+  // Hydraulics camera fix.
+  if (so_try_find_addr_rx(&game_mod, "_ZN4CPad16GetHydraulicJumpEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN4CPad16GetHydraulicJumpEv"),
+               (uintptr_t)CPad__GetHydraulicJump);
+  chid_getinputtype = so_try_find_addr_rx(&game_mod, "_ZN4CHID12GetInputTypeEv");
+  if (so_try_find_addr_rx(&game_mod, "_ZN11CAutomobile16HydraulicControlEv")) {
+    uintptr_t rx = so_find_addr_rx(&game_mod, "_ZN11CAutomobile16HydraulicControlEv");
+    hyd_freeze_ret = rx + 0xb50; // 0x6a2adc, the "not a hydraulics car" return path
+    hyd_cont_ret = rx + 0x4dc;   // 0x6a2468 (hook +16), rejoin the normal apply
+    hook_arm64(so_find_addr(&game_mod, "_ZN11CAutomobile16HydraulicControlEv") + 0x4cc,
+               (uintptr_t)hyd_freeze_stub);
+  }
+  if (so_try_find_addr_rx(&game_mod, "_ZN4CPad18AimWeaponLeftRightEP4CPedPb")) {
+    uintptr_t rx = so_find_addr_rx(&game_mod, "_ZN4CPad18AimWeaponLeftRightEP4CPedPb");
+    uint32_t *fn = (uint32_t *)so_find_addr(&game_mod,
+                                            "_ZN4CPad18AimWeaponLeftRightEP4CPedPb");
+    aim_lr_early = rx + 0x30;
+    aim_lr_cont = rx + 0xb0;
+    fn[0x9c / 4] = 0xD503201F; // NOP `cbz x0, +0xa8`
+    hook_arm64((uintptr_t)fn + 0xa0, (uintptr_t)aim_lr_stub);
+  }
+  if (so_try_find_addr_rx(&game_mod, "_ZN4CPad15AimWeaponUpDownEP4CPedPb")) {
+    uintptr_t rx = so_find_addr_rx(&game_mod, "_ZN4CPad15AimWeaponUpDownEP4CPedPb");
+    uint32_t *fn = (uint32_t *)so_find_addr(&game_mod,
+                                            "_ZN4CPad15AimWeaponUpDownEP4CPedPb");
+    aim_ud_early = rx + 0x28;
+    aim_ud_cont = rx + 0xa4;
+    fn[0x90 / 4] = 0xD503201F; // NOP `cbz x0, +0x9c`
+    hook_arm64((uintptr_t)fn + 0x94, (uintptr_t)aim_ud_stub);
+  }
+
+  // Free-aim binding.
+  CPlayerPed__ClearWeaponTarget =
+      (void *)so_try_find_addr_rx(&game_mod, "_ZN10CPlayerPed17ClearWeaponTargetEv");
+  CEntity__CleanUpOldReference =
+      (void *)so_try_find_addr_rx(&game_mod, "_ZN7CEntity19CleanUpOldReferenceEPPS_");
+  CGameLogic__IsCoopGameGoingOn =
+      (void *)so_try_find_addr_rx(&game_mod, "_ZN10CGameLogic17IsCoopGameGoingOnEv");
+  CHID__GetInputType = (void *)chid_getinputtype; // resolved above
+  MobileSettings_settings =
+      (void *)so_try_find_addr_rx(&game_mod, "_ZN14MobileSettings8settingsE");
+  if (so_try_find_addr_rx(&game_mod, "_ZN14MobileSettings13IsFreeAimModeEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN14MobileSettings13IsFreeAimModeEv"),
+               (uintptr_t)MobileSettings__IsFreeAimMode);
+  if (so_try_find_addr_rx(&game_mod, "_ZN14MobileSettings12IsLockOnModeEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN14MobileSettings12IsLockOnModeEv"),
+               (uintptr_t)MobileSettings__IsLockOnMode);
+  if (so_try_find_addr_rx(&game_mod, "_ZN10CPlayerPed22FindWeaponLockOnTargetEv")) {
+    findlock_cont =
+        so_find_addr_rx(&game_mod, "_ZN10CPlayerPed22FindWeaponLockOnTargetEv") + 0x10;
+    hook_arm64(so_find_addr(&game_mod, "_ZN10CPlayerPed22FindWeaponLockOnTargetEv"),
+               (uintptr_t)CPlayerPed__FindWeaponLockOnTarget);
+  }
+  if (so_try_find_addr_rx(&game_mod, "_ZN10CPlayerPed25Clear3rdPersonMouseTargetEv"))
+    hook_arm64(so_find_addr(&game_mod, "_ZN10CPlayerPed25Clear3rdPersonMouseTargetEv"),
+               (uintptr_t)CPlayerPed__Clear3rdPersonMouseTarget);
+  if (so_try_find_addr_rx(&game_mod,
+                          "_ZN23CTaskSimplePlayerOnFoot19ProcessPlayerWeaponEP10CPlayerPed")) {
+    uintptr_t rx = so_find_addr_rx(
+        &game_mod, "_ZN23CTaskSimplePlayerOnFoot19ProcessPlayerWeaponEP10CPlayerPed");
+    faim_ret_shift = rx + 0x1588; // 0x68a7ac (bl FindNextWeaponLockOnTarget)
+    faim_ret_else = rx + 0x158c;  // 0x68a7b0 (the fall-through path)
+    hook_arm64(so_find_addr(
+                   &game_mod,
+                   "_ZN23CTaskSimplePlayerOnFoot19ProcessPlayerWeaponEP10CPlayerPed") +
+                   0x14ac,
+               (uintptr_t)free_aim_stub);
+  }
+
   // Heli/plane camera fix.
   if (so_try_find_addr_rx(&game_mod,
                           "_ZN4CCam20Process_FollowCar_SAERK7CVectorfffb")) {
@@ -765,7 +922,7 @@ void patch_game(void) {
   if (so_try_find_addr_rx(&game_mod, "_Z17AND_BillingUpdateb"))
     hook_arm64(so_find_addr(&game_mod, "_Z17AND_BillingUpdateb"), (uintptr_t)ret0);
 
-  // No adjustable HUD.
+  // No adjustable
   if (so_try_find_addr_rx(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"))
     hook_arm64(so_find_addr(&game_mod, "_ZN14CAdjustableHUD10SaveToDiskEv"),
                (uintptr_t)ret0);

@@ -52,6 +52,16 @@ volatile int g_escape_pressed = 0;
 // hooks/game.c -- a clean, known-range signal, unlike the engine's scaled pad.
 volatile float g_right_stick_y = 0.0f;
 
+// Stick-button (L3/R3) held state, published each poll. The hydraulics camera
+// toggle in hooks/game.c does its own in-car edge detection off these, so pressing
+// R3 outside a hydraulics car is unaffected.
+volatile int g_r3_down = 0;
+volatile int g_l3_down = 0;
+
+// D-pad Down held state, published each poll. Read by the free-aim trigger in
+// hooks/game.c (pressing it during auto-aim releases the lock into free aim).
+volatile int g_dpad_down = 0;
+
 // provide replacement heap init function to separate newlib heap from the .so
 void __libnx_initheap(void) {
   void *addr;
@@ -395,6 +405,11 @@ static void update_gamepad(void) {
     open_cheat_keyboard();
 
   pad_prev = down;
+
+  // publish stick-button held state for the hydraulics camera toggle (hooks/game.c)
+  g_r3_down = (down & HidNpadButton_StickR) != 0;
+  g_l3_down = (down & HidNpadButton_StickL) != 0;
+  g_dpad_down = (down & HidNpadButton_Down) != 0; // free-aim trigger (hooks/game.c)
 
   const float scale = 1.f / 32767.0f;
   const HidAnalogStickState ls = padGetStickPos(&pad, 0);
