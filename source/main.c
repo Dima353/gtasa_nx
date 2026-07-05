@@ -47,6 +47,9 @@ int g_hide_saves_frames = 0;           // auto-clear countdown
 // '+' opens/closes the pause menu (no gamepad-mapped pause otherwise); consumed
 // by the CPad::GetEscapeJustDown hook in hooks/game.c.
 volatile int g_escape_pressed = 0;
+// '-' (Minus) edge, published each poll. Read by the pause-menu Start/Select fix in
+// hooks/game.c (opens the map when a menu is on screen).
+volatile int g_select_pressed = 0;
 
 // Right analog stick Y in [-1, 1] (up = negative, Android convention). Published
 // each poll from update_gamepad and read by the Hydra nozzle control in
@@ -404,6 +407,9 @@ static void update_gamepad(void) {
   // '+' edge -> pause/escape (consumed by the GetEscapeJustDown hook)
   if ((changed & HidNpadButton_Plus) && (down & HidNpadButton_Plus))
     g_escape_pressed = 1;
+  // '-' edge -> pause-menu "open map" (consumed by the MobileMenu::Update hook)
+  if ((changed & HidNpadButton_Minus) && (down & HidNpadButton_Minus))
+    g_select_pressed = 1;
 
   // L3+R3 edge -> on-screen keyboard for cheat entry
   const u64 cheat_combo = HidNpadButton_StickL | HidNpadButton_StickR;

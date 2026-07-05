@@ -19,11 +19,14 @@
  *    and CPad::AimWeaponUpDown+0x94 (0x4a019c). The car camera reads the right
  *    stick through these; in a hydraulics car they early-return 0 on the
  *    "hydraulics installed" flag (veh+0x4BA bit1), locking the camera. In camera
- *    mode we skip that early-return so the stick reaches the camera. The preceding
- *    `cbz x0,+N` (whose target lands inside our hook) is NOP'd in game.c and its
- *    x0==0 case handled here instead. We then reproduce `str xzr,[sp]` and the
- *    `bl CHID::GetInputType` (by pre-loading x30 with the rejoin address and
- *    tail-branching to GetInputType, so its ret lands there).
+ *    mode we skip that early-return so the stick reaches the camera. TWO conditional
+ *    branches (`cbz x0` on a null vehicle, and `b.ne` when GetInputType()!=1) target
+ *    the `str xzr,[sp]` that our hook overwrites; BOTH are NOP'd in game.c so control
+ *    falls through into this stub instead of jumping into the hook's trampoline bytes
+ *    (leaving either un-NOP'd crashes with an Undefined Instruction -- the b.ne fires
+ *    transiently at load). The x0==null case is handled here (label 2f). We then
+ *    reproduce `str xzr,[sp]` and the `bl CHID::GetInputType` (by pre-loading x30 with
+ *    the rejoin address and tail-branching to GetInputType, so its ret lands there).
  *
  * Written in .s for the same reasons as fov_stub.s (naked is ignored by this GCC;
  * hidden globals keep adrp/:lo12: PIC-valid). The runtime target addresses and the

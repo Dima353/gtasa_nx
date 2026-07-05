@@ -93,13 +93,44 @@ static int os_screen_get_height(void) { return screen_height; }
 // '+' -> pause menu: CPad::GetEscapeJustDown otherwise only consults the
 // keyboard/touch widget, so a controller can't open the pause menu. Fire it on
 // the '+' edge main.c records in g_escape_pressed.
-extern volatile int g_escape_pressed; // main.c
+//
+// Pause-menu Start/Select fix (see mobilemenu_update_stub.s).
+extern volatile int g_escape_pressed; // main.c ('+' edge)
+extern volatile int g_select_pressed; // main.c ('-' edge)
+static char *g_mobilemenu;            // &gMobileMenu (the instance)
+static void (*g_menu_popall)(void *self);  // MobileMenu::PopAllScreens (resume)
+extern void MobileMenu__Update_orig(void *self); // mobilemenu_update_stub.s
+__attribute__((visibility("hidden"))) uintptr_t mm_update_cont;
+
+static int menu_is_open(void) {
+  return g_mobilemenu && *(int *)(g_mobilemenu + 36) != 0;
+}
+
 static int GetEscapeJustDown_hook(void) {
+  if (menu_is_open())
+    return 0; // '+' resumes (handled in the Update hook), never re-opens the pause
   if (g_escape_pressed) {
     g_escape_pressed = 0;
     return 1;
   }
   return 0;
+}
+
+void MobileMenu__Update_hook(void *self) {
+  if (self && *(int *)((char *)self + 36) != 0) { // a menu screen is open
+    if (g_escape_pressed) {                        // '+' -> resume
+      g_escape_pressed = 0;
+      if (g_menu_popall)
+        g_menu_popall(self);
+    } else if (g_select_pressed) {                 // '-' -> toggle the pause map
+      g_select_pressed = 0;
+      char *open = (char *)self + 141;
+      *open = *open ? 0 : 1;
+    }
+  } else {
+    g_select_pressed = 0; // ignore '-' outside the pause menu
+  }
+  MobileMenu__Update_orig(self);
 }
 
 // Hydraulics camera fix.
@@ -310,6 +341,9 @@ void CAutomobile__Render_hook(void *self) {
     g_set_taxi_light(self, (driver && numPass == 0 && health > 0.0f) ? 1 : 0);
   }
 }
+
+// Night traffic-light + taxi-light glow on Medium/Low visual FX (originally the JPatch
+// "Fix traffic lights" intent).
 
 // PS2-style corona rotation (see corona_ps2_stub.s). Ported from JPatch
 __attribute__((visibility("hidden"))) uintptr_t corona_ps2_ret;
@@ -755,6 +789,18 @@ void patch_game(void) {
     hook_arm64(so_find_addr(&game_mod, "_ZN4CPad17GetEscapeJustDownEv"),
                (uintptr_t)GetEscapeJustDown_hook);
 
+  // Pause-menu Start/Select fix: hook MobileMenu::Update to route '+'->resume and
+  // '-'->map when a menu is open (see MobileMenu__Update_hook / GetEscapeJustDown_hook).
+  if (so_try_find_addr_rx(&game_mod, "_ZN10MobileMenu6UpdateEv") &&
+      so_try_find_addr_rx(&game_mod, "gMobileMenu")) {
+    g_mobilemenu = (char *)so_find_addr_rx(&game_mod, "gMobileMenu");
+    g_menu_popall = (void (*)(void *))so_find_addr_rx(
+        &game_mod, "_ZN10MobileMenu13PopAllScreensEv");
+    mm_update_cont = so_find_addr_rx(&game_mod, "_ZN10MobileMenu6UpdateEv") + 16;
+    hook_arm64(so_find_addr(&game_mod, "_ZN10MobileMenu6UpdateEv"),
+               (uintptr_t)MobileMenu__Update_hook);
+  }
+
   // main-thread stack-guard TLS
   init_fake_tls(main_fake_tls);
 
@@ -868,6 +914,7 @@ void patch_game(void) {
                                             "_ZN4CPad18AimWeaponLeftRightEP4CPedPb");
     aim_lr_early = rx + 0x30;
     aim_lr_cont = rx + 0xb0;
+    fn[0x8c / 4] = 0xD503201F; // NOP `b.ne +0xa8` (would jump into the trampoline)
     fn[0x9c / 4] = 0xD503201F; // NOP `cbz x0, +0xa8`
     hook_arm64((uintptr_t)fn + 0xa0, (uintptr_t)aim_lr_stub);
   }
@@ -877,6 +924,7 @@ void patch_game(void) {
                                             "_ZN4CPad15AimWeaponUpDownEP4CPedPb");
     aim_ud_early = rx + 0x28;
     aim_ud_cont = rx + 0xa4;
+    fn[0x80 / 4] = 0xD503201F; // NOP `b.ne +0x9c` (would jump into the trampoline)
     fn[0x90 / 4] = 0xD503201F; // NOP `cbz x0, +0x9c`
     hook_arm64((uintptr_t)fn + 0x94, (uintptr_t)aim_ud_stub);
   }
@@ -1097,6 +1145,19 @@ void patch_game(void) {
         so_find_addr_rx(&game_mod, "_ZN11CAutomobile6RenderEv") + 16;
     hook_arm64(so_find_addr(&game_mod, "_ZN11CAutomobile6RenderEv"),
                (uintptr_t)CAutomobile__Render_hook);
+  }
+
+  // Night traffic-light + Taxi(420) light glow on Medium/Low visual FX.
+  if (so_try_find_addr_rx(&game_mod,
+                          "_ZN14CTrafficLights18DisplayActualLightEP7CEntity")) {
+    uint32_t *fn = (uint32_t *)so_find_addr(
+        &game_mod, "_ZN14CTrafficLights18DisplayActualLightEP7CEntity");
+    fn[0x268 / 4] = 0xD503201F; // b.lt (+0x268) -> nop: corona on all FX levels
+  }
+  if (so_try_find_addr_rx(&game_mod, "_ZN11CAutomobile9PreRenderEv")) {
+    uint32_t *fn =
+        (uint32_t *)so_find_addr(&game_mod, "_ZN11CAutomobile9PreRenderEv");
+    fn[0x864 / 4] = 0xD503201F; // b.lt (+0x864) -> nop: Taxi roof light on all FX
   }
 
   // Fix underwater airbubbles coming from CJ's jaw instead of his mouth (JPatch
