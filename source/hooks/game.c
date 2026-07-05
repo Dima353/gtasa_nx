@@ -648,6 +648,8 @@ static void controls_defaults(void) {
   g_remap[39] = 7;   // TURRET_RIGHT (yaw right) ZR(69) -> R1(7)
   g_remap[95] = 0;   // vehicle gun fire         L1(6)  -> CROSS(0)
   g_remap[88] = 0;   // aircraft flare/2nd wpn   R1(7)  -> CROSS(0)
+  g_remap[64] = 1;   // MENU_ACCEPT  -> CIRCLE (Switch A)
+  g_remap[65] = 0;   // MENU_BACK    -> CROSS  (Switch B)
 }
 
 static const struct { const char *n; int v; } remap_actions[] = {
@@ -1034,6 +1036,20 @@ void patch_game(void) {
   if (so_try_find_addr_rx(&game_mod, "_ZN12CHIDJoystick10AddMappingEi10HIDMapping"))
     hook_arm64(so_find_addr(&game_mod, "_ZN12CHIDJoystick10AddMappingEi10HIDMapping"),
                (uintptr_t)CHIDJoystick__AddMapping);
+
+  // Swap the A<->B and X<->Y button-prompt ICONS to the Switch face-button layout.
+  {
+    const uint32_t eor_w21_w11_1 = 0x52000175; // eor w21, w11, #1
+    const char *find_uvs[] = {
+        "_ZN19CHIDJoystickXbox36018FindUVsFromMappingEPKc10HIDMappingb",
+        "_ZN27CHIDJoystickXbox360Standard18FindUVsFromMappingEPKc10HIDMappingb",
+    };
+    for (unsigned i = 0; i < sizeof(find_uvs) / sizeof(*find_uvs); i++)
+      if (so_try_find_addr_rx(&game_mod, find_uvs[i])) {
+        uint32_t *fn = (uint32_t *)so_find_addr(&game_mod, find_uvs[i]);
+        fn[0x3c / 4] = eor_w21_w11_1; // `mov w21,w11` -> `eor w21,w11,#1`
+      }
+  }
 
   // Emergency-vehicle / widescreen FOV fix.
   if (so_try_find_addr_rx(&game_mod, "_ZN5CDraw6SetFOVEfb")) {

@@ -342,7 +342,7 @@ static void glBufferData_w(GLenum target, GLsizeiptr size, const void *data,
   glBufferData(target, size, data, usage);
 }
 
-FILE *stderr_fake = (FILE *)0x1337;
+FILE *stderr_fake = (FILE *)&fake_sF[2];
 
 // OpenAL hooks living in hooks/openal.c (frequency override + device capture)
 extern ALCcontext *alcCreateContextHook(ALCdevice *dev, const ALCint *unused);
