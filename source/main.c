@@ -25,7 +25,6 @@
 #include "hooks.h"
 #include "imports.h"
 #include "jni_fake.h"
-#include "movie_player.h"
 #include "settings_menu.h"
 
 static void *heap_so_base = NULL;
@@ -397,7 +396,6 @@ static void update_gamepad(void) {
     if (changed & pad_map[i].hid) {
       if (down & pad_map[i].hid) {
         implOnGamepadButtonDown(fake_env, NULL, 0, pad_map[i].button);
-        movie_skip(); // the game ignores input while waiting for a movie
       } else {
         implOnGamepadButtonUp(fake_env, NULL, 0, pad_map[i].button);
       }
@@ -514,7 +512,6 @@ int main(void) {
   so_resolve(&game_mod, dynlib_functions, dynlib_numfunctions, 1);
 
   patch_game();
-  movie_wad_init();   // resolve cFile syms now (symtab is freed by so_flush_caches)
 
   resolve_entry_points();
   int (* JNI_OnLoad)(void *vm, void *reserved) = (void *)so_find_addr_rx(&game_mod, "JNI_OnLoad");
@@ -585,7 +582,6 @@ int main(void) {
     implOnDrawFrame(fake_env, NULL, dt);
 
     // keep movie playback going when the game stops rendering during it
-    movie_main_loop_tick();
     jni_video_tick();
 
     if (boot_frames < 10) {

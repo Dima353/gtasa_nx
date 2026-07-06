@@ -50,7 +50,7 @@
 #include "so_util.h"
 #include "util.h"
 #include "libc_shim.h"
-#include "movie_player.h"
+#include "overlay.h"
 
 extern uintptr_t __cxa_atexit;
 
@@ -781,7 +781,7 @@ DynLibFunction dynlib_functions[] = {
   { "eglDestroySurface", (uintptr_t)&eglDestroySurface },
   { "eglDestroyContext", (uintptr_t)&eglDestroyContext },
   { "eglMakeCurrent", (uintptr_t)&eglMakeCurrent_dedup },
-  // hooked so the movie player can overlay video frames before each swap
+  // reset the GL cache after the overlay's direct GL, then run the (FPS) swap hook
   { "eglSwapBuffers", (uintptr_t)&eglSwapBuffers_cache },
   { "eglSwapInterval", (uintptr_t)&eglSwapInterval },
   { "eglGetError", (uintptr_t)&eglGetError },

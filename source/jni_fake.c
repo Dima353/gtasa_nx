@@ -18,7 +18,6 @@
 #include "config.h"
 #include "util.h"
 #include "jni_fake.h"
-#include "movie_player.h"
 
 #define JNI_OK 0
 #define JNI_VERSION_1_6 0x00010006
@@ -251,13 +250,6 @@ static int next_int(va_list va) { return va_arg(va, int); }
 // sane default (the engine treats missing services as "feature unavailable").
 // ---------------------------------------------------------------------------
 
-static int g_video_finish_pending;
-
-void jni_video_tick(void) {
-  if (g_video_finish_pending && !movie_is_playing())
-    g_video_finish_pending = 0;
-}
-
 static int name_is(const FakeID *id, const char *n) { return strcmp(id->name, n) == 0; }
 
 static void hal_void(const FakeID *id, va_list va) {
@@ -282,16 +274,6 @@ static void hal_void(const FakeID *id, va_list va) {
     cpu_boost(0);
     jni_frontend_ready = 1;
     debugPrintf("JNI: hideSplashScreen -> frontend ready\n");
-    return;
-  }
-
-  // intro movie subtitles -> the GL movie overlay
-  if (name_is(id, "setMovieText")) {
-    movie_set_text(next_str(va));
-    return;
-  }
-  if (name_is(id, "setMovieTextScale")) {
-    movie_set_text_scale(next_int(va));
     return;
   }
 
@@ -346,9 +328,6 @@ static juint hal_int(const FakeID *id, va_list va) {
 static juint hal_bool(const FakeID *id, va_list va) {
   (void)va;
   const char *name = id->name;
-
-  if (name_is(id, "isMoviePlaying"))
-    return movie_is_playing();
 
   // no Java splash, so it is never "visible"
   if (name_is(id, "isSplashScreenVisible"))
