@@ -25,7 +25,6 @@
 #include "hooks.h"
 #include "imports.h"
 #include "jni_fake.h"
-#include "movie_player.h"
 
 static void *heap_so_base = NULL;
 static size_t heap_so_limit = 0;
@@ -134,7 +133,14 @@ static void set_screen_size(int w, int h) {
 //
 // implOnGamepadButtonDown/Up take a 0-15 button INDEX into the engine's 16-entry
 // ButtonContainer, NOT an Android keycode; any value >15 faults past the array.
-// Positional face buttons: Switch B = bottom = the "A" confirm button (index 0).
+//
+// Face buttons are the only part that differs between the two layouts (chosen by
+// config.xbox_layout):
+//   0 (default) "Nintendo": the Switch's labelled button drives the engine's
+//     same-letter button (Switch A -> engine A, ...), so the on-screen A/B/X/Y
+//     prompts match the physical Switch labels.
+//   1 "Xbox"/positional: match by physical position (Switch bottom B -> engine
+//     A, etc.) -- the original mapping, kept for players who prefer it.
 // ---------------------------------------------------------------------------
 
 #define GPAD_A          0  // bottom face (confirm)
@@ -159,11 +165,21 @@ typedef struct {
   int button;
 } PadMap;
 
-static const PadMap pad_map[] = {
+static const PadMap pad_face_nintendo[] = {
+  { HidNpadButton_A, GPAD_A },
+  { HidNpadButton_B, GPAD_B },
+  { HidNpadButton_X, GPAD_X },
+  { HidNpadButton_Y, GPAD_Y },
+};
+static const PadMap pad_face_xbox[] = {
   { HidNpadButton_B, GPAD_A },
   { HidNpadButton_A, GPAD_B },
   { HidNpadButton_Y, GPAD_X },
   { HidNpadButton_X, GPAD_Y },
+};
+
+// shared across both layouts
+static const PadMap pad_map[] = {
   { HidNpadButton_L, GPAD_L1 },
   { HidNpadButton_R, GPAD_R1 },
   { HidNpadButton_ZL, GPAD_L2 },
@@ -360,21 +376,27 @@ static void dispatch_jni_callbacks(void) {
 static PadState pad;
 static u64 pad_prev = 0;
 
+// drive one button table into the engine on the press/release edges
+static void send_pad_buttons(const PadMap *map, unsigned n, u64 down, u64 changed) {
+  for (unsigned i = 0; i < n; i++) {
+    if (!(changed & map[i].hid))
+      continue;
+    if (down & map[i].hid) {
+      implOnGamepadButtonDown(fake_env, NULL, 0, map[i].button);
+    } else {
+      implOnGamepadButtonUp(fake_env, NULL, 0, map[i].button);
+    }
+  }
+}
+
 static void update_gamepad(void) {
   padUpdate(&pad);
   const u64 down = padGetButtons(&pad);
   const u64 changed = down ^ pad_prev;
 
-  for (unsigned int i = 0; i < sizeof(pad_map) / sizeof(*pad_map); i++) {
-    if (changed & pad_map[i].hid) {
-      if (down & pad_map[i].hid) {
-        implOnGamepadButtonDown(fake_env, NULL, 0, pad_map[i].button);
-        movie_skip(); // the game ignores input while waiting for a movie
-      } else {
-        implOnGamepadButtonUp(fake_env, NULL, 0, pad_map[i].button);
-      }
-    }
-  }
+  // face buttons follow the layout config; everything else is shared
+  send_pad_buttons(config.xbox_layout ? pad_face_xbox : pad_face_nintendo, 4, down, changed);
+  send_pad_buttons(pad_map, sizeof(pad_map) / sizeof(*pad_map), down, changed);
 
   // '+' edge -> pause/escape (consumed by the GetEscapeJustDown hook)
   if ((changed & HidNpadButton_Plus) && (down & HidNpadButton_Plus))
@@ -411,8 +433,10 @@ int main(void) {
   setenv("MESA_GLTHREAD", "false", 1);
   setenv("GALLIUM_THREAD", "0", 1);
 
-  if (read_config(CONFIG_NAME) < 0)
-    write_config(CONFIG_NAME);
+  // load config (defaults if absent), then write it back so newly-added keys
+  // like xbox_layout always show up in the config file for editing
+  read_config(CONFIG_NAME);
+  write_config(CONFIG_NAME);
 
   check_syscalls();
   check_data();
@@ -448,7 +472,6 @@ int main(void) {
   so_resolve(&game_mod, dynlib_functions, dynlib_numfunctions, 1);
 
   patch_game();
-  movie_wad_init();   // resolve cFile syms now (symtab is freed by so_flush_caches)
 
   resolve_entry_points();
   int (* JNI_OnLoad)(void *vm, void *reserved) = (void *)so_find_addr_rx(&game_mod, "JNI_OnLoad");
@@ -518,10 +541,6 @@ int main(void) {
 
     implOnDrawFrame(fake_env, NULL, dt);
 
-    // keep movie playback going when the game stops rendering during it
-    movie_main_loop_tick();
-    jni_video_tick();
-
     if (boot_frames < 10) {
       if (++boot_frames == 10)
         cpu_boost(0);
@@ -539,7 +558,6 @@ int main(void) {
   implOnSurfaceDestroyed(fake_env, NULL);
   implOnActivityDestroyed(fake_env, NULL);
 
-  movie_stop();
   deinit_openal();
   socketExit();
 

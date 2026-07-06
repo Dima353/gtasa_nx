@@ -1,7 +1,7 @@
 /* jni_fake.h -- fake JNI environment for the GTA:SA oswrapper/GameNative layer
  *
  * The game reaches a thin Java platform layer over JNI for a few things (the
- * app-local key/value store, splash screen, intro movie, device locale/version).
+ * app-local key/value store, splash screen, device locale/version).
  * We emulate just enough JavaVM/JNIEnv for those calls to resolve; all bulk data
  * is loaded natively, not through Java.
  *
@@ -25,10 +25,6 @@ extern volatile int jni_quit_requested;
 extern volatile int jni_frontend_ready;
 
 void jni_init(void);
-
-// per-frame pump: fires the engine's video-finished path once a JNI-started
-// movie has ended (call once per main-loop iteration)
-void jni_video_tick(void);
 
 // ---------------------------------------------------------------------------
 // deferred native callbacks: GameNative entry points the Java platform layer

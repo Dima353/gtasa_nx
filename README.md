@@ -50,6 +50,8 @@ The port has a config file at `/switch/gtasa/config.txt`, created on first run:
   handheld and 1920x1080 docked
 * `trilinear_filter` — `1` forces trilinear texture filtering
 * `show_fps` — `1` draws a small FPS counter in the top-left corner
+* `xbox_layout` — `1` uses the original Xbox/positional face buttons; default
+  `0` matches the Switch's A/B/X/Y labels
 
 ### How to build
 
@@ -58,7 +60,6 @@ You're going to need devkitA64 and the following packages/libraries:
 * `switch-libdrm_nouveau`
 * `switch-sdl2`
 * `switch-mpg123`
-* `switch-ffmpeg`
 * `switch-openal-soft`
 * `devkitpro-pkgbuild-helpers`
 
