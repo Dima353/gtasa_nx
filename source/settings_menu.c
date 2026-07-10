@@ -231,7 +231,7 @@ void settings_menu_maybe_show(void) {
       {"Sprint on any surface", &config.sprint_any_surface},
       {"Trilinear filtering", &config.trilinear_filter},
       {"Mobile Widgets", &config.mobile_widgets},
-      {"FPS counter (may stall)", &config.show_fps},
+      {"FPS counter", &config.show_fps},
   };
   const int n = (int)(sizeof(items) / sizeof(items[0]));
   int cursor = 0, save = 0, stick_ready = 1;
