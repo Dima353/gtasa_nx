@@ -35,12 +35,16 @@ ALCdevice *alcOpenDeviceHook(const char *name) {
   return al_dev;
 }
 
+// Idempotent: safe to call more than once (both the JNI-quit and menu-Exit paths
+// funnel through hard_exit, and we must never double-close the device).
 void deinit_openal(void) {
   if (al_dev) {
     if (al_ctx) {
       alcMakeContextCurrent(NULL);
       alcDestroyContext(al_ctx);
+      al_ctx = NULL;
     }
     alcCloseDevice(al_dev);
+    al_dev = NULL;
   }
 }

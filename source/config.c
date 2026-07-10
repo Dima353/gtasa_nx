@@ -18,7 +18,14 @@
   CONFIG_VAR_INT(screen_height); \
   CONFIG_VAR_INT(trilinear_filter); \
   CONFIG_VAR_INT(show_fps); \
-  CONFIG_VAR_INT(xbox_layout);
+  CONFIG_VAR_INT(ps2_corona_rotation); \
+  CONFIG_VAR_INT(ps2_color_filter); \
+  CONFIG_VAR_INT(sprint_any_surface); \
+  CONFIG_VAR_INT(remove_air_resistance); \
+  CONFIG_VAR_INT(show_wanted_stars); \
+  CONFIG_VAR_INT(disable_ped_spec); \
+  CONFIG_VAR_INT(no_offscreen_despawn); \
+  CONFIG_VAR_INT(mobile_widgets);
 
 Config config;
 
@@ -44,7 +51,14 @@ int read_config(const char *file) {
   config.screen_height = -1;
   config.trilinear_filter = 1;
   config.show_fps = 0; // small FPS counter in the top left corner
-  config.xbox_layout = 0; // 0 = Nintendo face-button layout, 1 = legacy Xbox
+  config.ps2_corona_rotation = 1; // PS2 corona rotation on by default
+  config.ps2_color_filter = 1;    // PS2 color filter on by default
+  config.sprint_any_surface = 0;    // off by default (stock)
+  config.remove_air_resistance = 0; // off by default (stock)
+  config.show_wanted_stars = 0;     // off by default (stock: stars only when wanted)
+  config.disable_ped_spec = 1;      // on by default (remove ped/character specular shine)
+  config.no_offscreen_despawn = 1;  // on by default (cars/peds stay off-screen)
+  config.mobile_widgets = 0;        // off by default = hide the mobile touch widgets
 
   FILE *f = fopen(file, "r");
   if (f == NULL)

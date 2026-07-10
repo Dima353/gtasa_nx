@@ -87,6 +87,31 @@ void set_thread_core(int core) {
     debugPrintf("affinity: pin to core %d failed: %08x\n", core, rc);
 }
 
+// --- thread registry (see util.h) -----------------------------------------
+#define MAX_TRACKED_THREADS 64
+static Handle g_thread_handles[MAX_TRACKED_THREADS];
+static int g_thread_count; // grow-only; index reserved with an atomic add
+
+void thread_registry_add(void) {
+  int i = __atomic_fetch_add(&g_thread_count, 1, __ATOMIC_RELAXED);
+  if (i < MAX_TRACKED_THREADS)
+    g_thread_handles[i] = threadGetCurHandle();
+}
+
+void thread_registry_pause_others(void) {
+  Handle self = threadGetCurHandle();
+  int n = g_thread_count;
+  if (n > MAX_TRACKED_THREADS)
+    n = MAX_TRACKED_THREADS;
+  int paused = 0;
+  for (int i = 0; i < n; i++) {
+    Handle h = g_thread_handles[i];
+    if (h && h != self && R_SUCCEEDED(svcSetThreadActivity(h, ThreadActivity_Paused)))
+      paused++;
+  }
+  debugPrintf("EXIT: paused %d/%d engine threads\n", paused, n);
+}
+
 int ret0(void) { return 0; }
 
 int retm1(void) { return -1; }

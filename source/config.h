@@ -40,7 +40,18 @@ typedef struct {
   int screen_height;
   int trilinear_filter;
   int show_fps;
-  int xbox_layout;   // face buttons: 0 = Nintendo labels (default), 1 = legacy Xbox/positional
+  // PS2-style rendering (SkyGFX-derived) toggles. Each 1 = on, 0 = off.
+  int ps2_corona_rotation; // #1: coronas spin like PS2/PC
+  int ps2_color_filter;    // #3: PS2 color-grade filter in CPostEffects::MobileRender
+  // Gameplay-feel fixes (Vita Category A). 1 = fix applied, 0 = stock. Default 0.
+  int sprint_any_surface;    // SurfaceInfos_c::CantSprintOn -> ret0 (sprint on sand/grass)
+  int remove_air_resistance; // CCullZones::DoExtraAirResistanceForPlayer -> ret0
+  int show_wanted_stars;     // CWidgetPlayerInfo::DrawWanted: always draw the stars
+  int disable_ped_spec;      // BuildPixelSource: drop BONE3|BONE4 from the spec gate
+  int no_offscreen_despawn;  // cars/peds don't despawn off-screen (re3); perf cost
+  int mobile_widgets;        // 1 = show the mobile-only touch widgets; 0 (default) =
+                             // hide them (steering-method popup, cutscene-skip button,
+                             // and the 3 touch rows in the controls menu)
 } Config;
 
 extern Config config;

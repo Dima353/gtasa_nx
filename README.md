@@ -50,8 +50,28 @@ The port has a config file at `/switch/gtasa/config.txt`, created on first run:
   handheld and 1920x1080 docked
 * `trilinear_filter` — `1` forces trilinear texture filtering
 * `show_fps` — `1` draws a small FPS counter in the top-left corner
-* `xbox_layout` — `1` uses the original Xbox/positional face buttons; default
-  `0` matches the Switch's A/B/X/Y labels
+* `ps2_corona_rotation` — `1` PS2 Corona Sun
+* `ps2_color_filter` — `1` PS2 Color filter
+* `sprint_any_surface` — `0` Sprinting on any surface is allowed
+* `remove_air_resistance` — `0` Remove "ExtraAirResistance" flag
+* `show_wanted_stars` — `0` Always drawable wanted stars
+* `disable_ped_spec` — `1` Removed specular lighting on pedestrians
+* `no_offscreen_despawn` — `0` Cars and peds don't despawn when you look away
+* `mobile_widgets` — `0` Hidden Mobile Widgets
+
+### Tips and Tricks
+
+- You can input PC cheats by pressing **R3** + **L3** to open the on-screen keyboard. See [CHEATS.md](CHEATS.md) for available and unavailable cheats (you can input cheat codes in lowercase as well as uppercase).
+- Due to expired licensing, some songs were cut from the game. See [MUSIC.md](MUSIC.md) for a list of removed tracks and a guide on how to restore them.
+- Console-style HUD (optional). Drop a custom `Adjustable.cfg` into `switch/gtasa/` for the console HUD (e.g. radar in the bottom-left corner). Since **v2.11.311** no longer includes `data/360Default1280x720.cfg`, take it from the older **v2.10** build and rename it to `Adjustable.cfg`. It's a leftover from the Xbox 360 version.
+
+### Mod Settings Menu
+
+The port includes a built-in configurator for toggling the mod's fixes and features.
+
+**To open it:** at launch, a splash screen appears for ~3 seconds
+("Hold ZR for Mod Settings"). **Hold ZR** during this window to enter the menu.
+If you don't hold ZR, the game boots normally.
 
 ### How to build
 
@@ -69,6 +89,9 @@ Then run `make` (with `DEVKITPRO` set in the environment).
 
 * TheOfficialFloW for the method and the original PS Vita work;
 * fgsfds for max_nx, which the shared Switch platform layer is based on;
+* Gameplay and engine improvements ported from the [GTA:SA PS Vita port](https://github.com/TheOfficialFloW/gtasa_vita).
+* Extra patches and hooks adapted from [JPatch](https://github.com/AndroidModLoader/JPatch).
+* See the [CHANGELOG.md](CHANGELOG.md) for everything that changed.
 
 ### Support
 

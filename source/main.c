@@ -25,6 +25,7 @@
 #include "hooks.h"
 #include "imports.h"
 #include "jni_fake.h"
+#include "settings_menu.h"
 
 static void *heap_so_base = NULL;
 static size_t heap_so_limit = 0;
@@ -45,6 +46,29 @@ int g_hide_saves_frames = 0;           // auto-clear countdown
 // '+' opens/closes the pause menu (no gamepad-mapped pause otherwise); consumed
 // by the CPad::GetEscapeJustDown hook in hooks/game.c.
 volatile int g_escape_pressed = 0;
+// '-' (Minus) edge, published each poll. Read by the pause-menu Start/Select fix in
+// hooks/game.c (opens the map when a menu is on screen).
+volatile int g_select_pressed = 0;
+
+// Right analog stick Y in [-1, 1] (up = negative, Android convention). Published
+// each poll from update_gamepad and read by the Hydra nozzle control in
+// hooks/game.c -- a clean, known-range signal, unlike the engine's scaled pad.
+volatile float g_right_stick_y = 0.0f;
+
+// Stick-button (L3/R3) held state, published each poll. The hydraulics camera
+// toggle in hooks/game.c does its own in-car edge detection off these, so pressing
+// R3 outside a hydraulics car is unaffected.
+volatile int g_r3_down = 0;
+volatile int g_l3_down = 0;
+
+// D-pad Down held state, published each poll. Read by the free-aim trigger in
+// hooks/game.c (pressing it during auto-aim releases the lock into free aim).
+volatile int g_dpad_down = 0;
+
+// L1/R1 (shoulder) held state, published each poll. Read by the plane rudder
+// (hooks/game.c CPlane__rudder_turret_input) to yaw the Hydra/planes from L1/R1.
+volatile int g_l1_down = 0;
+volatile int g_r1_down = 0;
 
 // provide replacement heap init function to separate newlib heap from the .so
 void __libnx_initheap(void) {
@@ -131,67 +155,37 @@ static void set_screen_size(int w, int h) {
 // ---------------------------------------------------------------------------
 // input: fed through the GameNative gamepad/touch entry points.
 //
-// implOnGamepadButtonDown/Up take a 0-15 button INDEX into the engine's 16-entry
-// ButtonContainer, NOT an Android keycode; any value >15 faults past the array.
-//
-// Face buttons are the only part that differs between the two layouts (chosen by
-// config.xbox_layout):
-//   0 (default) "Nintendo": the Switch's labelled button drives the engine's
-//     same-letter button (Switch A -> engine A, ...), so the on-screen A/B/X/Y
-//     prompts match the physical Switch labels.
-//   1 "Xbox"/positional: match by physical position (Switch bottom B -> engine
-//     A, etc.) -- the original mapping, kept for players who prefer it.
+// implOnGamepadButtonDown/Up take the engine's ButtonID (CHIDJoystick numbering),
+// NOT a raw 0-15 keycode. Correct IDs (from the mobile engine / gtasa_vita config.h,
+// verified against CHIDJoystickXbox360Standard's default map):
+//   CROSS=0 CIRCLE=1 SQUARE=2 TRIANGLE=3 START=4 SELECT=5 L1=6 R1=7
+//   DPAD_UP=8 DPAD_DOWN=9 DPAD_LEFT=10 DPAD_RIGHT=11 L3=12 R3=13; L2=68 R2=69.
+// L2/R2 (ZL/ZR) are ANALOG triggers reported via implOnGamepadAxesChanged (lt/rt),
+// so they are not in this digital table. Plus is reserved for the pause menu.
+// (The old table used a different numbering, which is why the d-pad/crouch were
+// mismapped.)
 // ---------------------------------------------------------------------------
-
-#define GPAD_A          0  // bottom face (confirm)
-#define GPAD_B          1  // right face (back)
-#define GPAD_X          2  // left face
-#define GPAD_Y          3  // top face
-#define GPAD_L1         4
-#define GPAD_R1         5
-#define GPAD_L2         6
-#define GPAD_R2         7
-#define GPAD_SELECT     8
-#define GPAD_START      9
-#define GPAD_THUMBL    10
-#define GPAD_THUMBR    11
-#define GPAD_DPAD_UP   12
-#define GPAD_DPAD_DOWN 13
-#define GPAD_DPAD_LEFT 14
-#define GPAD_DPAD_RIGHT 15
 
 typedef struct {
   u64 hid;
   int button;
 } PadMap;
 
-static const PadMap pad_face_nintendo[] = {
-  { HidNpadButton_A, GPAD_A },
-  { HidNpadButton_B, GPAD_B },
-  { HidNpadButton_X, GPAD_X },
-  { HidNpadButton_Y, GPAD_Y },
-};
-static const PadMap pad_face_xbox[] = {
-  { HidNpadButton_B, GPAD_A },
-  { HidNpadButton_A, GPAD_B },
-  { HidNpadButton_Y, GPAD_X },
-  { HidNpadButton_X, GPAD_Y },
-};
-
-// shared across both layouts
 static const PadMap pad_map[] = {
-  { HidNpadButton_L, GPAD_L1 },
-  { HidNpadButton_R, GPAD_R1 },
-  { HidNpadButton_ZL, GPAD_L2 },
-  { HidNpadButton_ZR, GPAD_R2 },
-  { HidNpadButton_Up, GPAD_DPAD_UP },
-  { HidNpadButton_Down, GPAD_DPAD_DOWN },
-  { HidNpadButton_Left, GPAD_DPAD_LEFT },
-  { HidNpadButton_Right, GPAD_DPAD_RIGHT },
-  { HidNpadButton_StickL, GPAD_THUMBL },
-  { HidNpadButton_StickR, GPAD_THUMBR },
-  { HidNpadButton_Plus, GPAD_START },
-  { HidNpadButton_Minus, GPAD_SELECT },
+  { HidNpadButton_B,       0 },  // CROSS  (bottom face / confirm)
+  { HidNpadButton_A,       1 },  // CIRCLE (right face)
+  { HidNpadButton_Y,       2 },  // SQUARE (left face)
+  { HidNpadButton_X,       3 },  // TRIANGLE (top face)
+  { HidNpadButton_Plus,    4 },  // START (menu accept / resume; open is via g_escape)
+  { HidNpadButton_Minus,   5 },  // SELECT
+  { HidNpadButton_L,       6 },  // L1
+  { HidNpadButton_R,       7 },  // R1
+  { HidNpadButton_Up,      8 },  // DPAD_UP
+  { HidNpadButton_Down,    9 },  // DPAD_DOWN
+  { HidNpadButton_Left,   10 },  // DPAD_LEFT
+  { HidNpadButton_Right,  11 },  // DPAD_RIGHT
+  { HidNpadButton_StickL, 12 },  // L3
+  { HidNpadButton_StickR, 13 },  // R3
 };
 
 // GameNative entry points of libGame.so (Java_com_rockstargames_oswrapper_*).
@@ -376,17 +370,21 @@ static void dispatch_jni_callbacks(void) {
 static PadState pad;
 static u64 pad_prev = 0;
 
-// drive one button table into the engine on the press/release edges
-static void send_pad_buttons(const PadMap *map, unsigned n, u64 down, u64 changed) {
-  for (unsigned i = 0; i < n; i++) {
-    if (!(changed & map[i].hid))
-      continue;
-    if (down & map[i].hid) {
-      implOnGamepadButtonDown(fake_env, NULL, 0, map[i].button);
-    } else {
-      implOnGamepadButtonUp(fake_env, NULL, 0, map[i].button);
-    }
-  }
+// Cheat entry: open the Switch on-screen keyboard and feed the typed code to the
+// game's CCheat via cheats_enqueue (hooks/game.c). Blocks the main loop while the
+// keyboard is up (the render thread keeps presenting the last frame).
+static void open_cheat_keyboard(void) {
+  SwkbdConfig kbd;
+  if (R_FAILED(swkbdCreate(&kbd, 0)))
+    return;
+  swkbdConfigMakePresetDefault(&kbd);
+  swkbdConfigSetHeaderText(&kbd, "Enter cheat code");
+  swkbdConfigSetStringLenMax(&kbd, 63);
+  char out[64] = { 0 };
+  Result rc = swkbdShow(&kbd, out, sizeof(out));
+  swkbdClose(&kbd);
+  if (R_SUCCEEDED(rc) && out[0])
+    cheats_enqueue(out);
 }
 
 static void update_gamepad(void) {
@@ -394,15 +392,36 @@ static void update_gamepad(void) {
   const u64 down = padGetButtons(&pad);
   const u64 changed = down ^ pad_prev;
 
-  // face buttons follow the layout config; everything else is shared
-  send_pad_buttons(config.xbox_layout ? pad_face_xbox : pad_face_nintendo, 4, down, changed);
-  send_pad_buttons(pad_map, sizeof(pad_map) / sizeof(*pad_map), down, changed);
+  for (unsigned int i = 0; i < sizeof(pad_map) / sizeof(*pad_map); i++) {
+    if (changed & pad_map[i].hid) {
+      if (down & pad_map[i].hid) {
+        implOnGamepadButtonDown(fake_env, NULL, 0, pad_map[i].button);
+      } else {
+        implOnGamepadButtonUp(fake_env, NULL, 0, pad_map[i].button);
+      }
+    }
+  }
 
   // '+' edge -> pause/escape (consumed by the GetEscapeJustDown hook)
   if ((changed & HidNpadButton_Plus) && (down & HidNpadButton_Plus))
     g_escape_pressed = 1;
+  // '-' edge -> pause-menu "open map" (consumed by the MobileMenu::Update hook)
+  if ((changed & HidNpadButton_Minus) && (down & HidNpadButton_Minus))
+    g_select_pressed = 1;
+
+  // L3+R3 edge -> on-screen keyboard for cheat entry
+  const u64 cheat_combo = HidNpadButton_StickL | HidNpadButton_StickR;
+  if ((changed & cheat_combo) && (down & cheat_combo) == cheat_combo)
+    open_cheat_keyboard();
 
   pad_prev = down;
+
+  // publish stick-button held state for the hydraulics camera toggle (hooks/game.c)
+  g_r3_down = (down & HidNpadButton_StickR) != 0;
+  g_l3_down = (down & HidNpadButton_StickL) != 0;
+  g_dpad_down = (down & HidNpadButton_Down) != 0; // free-aim trigger (hooks/game.c)
+  g_l1_down = (down & HidNpadButton_L) != 0;       // plane rudder yaw (hooks/game.c)
+  g_r1_down = (down & HidNpadButton_R) != 0;
 
   const float scale = 1.f / 32767.0f;
   const HidAnalogStickState ls = padGetStickPos(&pad, 0);
@@ -413,6 +432,7 @@ static void update_gamepad(void) {
   const float ly = (float)ls.y * -scale;
   const float rx = (float)rs.x * scale;
   const float ry = (float)rs.y * -scale;
+  g_right_stick_y = ry; // publish for the Hydra nozzle control (hooks/game.c)
   const float lt = (down & HidNpadButton_ZL) ? 1.0f : 0.0f;
   const float rt = (down & HidNpadButton_ZR) ? 1.0f : 0.0f;
 
@@ -424,6 +444,24 @@ static void update_gamepad(void) {
   }
 }
 
+// The mobile engine has no real shutdown path; its teardown (GL/audio static
+// destructors) crashes on Switch. Since the process is exiting anyway, skip all
+// cleanup: commit the SD so a just-written save persists, then terminate
+// immediately (like the Vita loader's sceKernelExitProcess). Never returns.
+void hard_exit(void) {
+  // The mobile engine never stops its own worker threads (unlike the HL2 port, whose
+  // engine returns with threads wound down). Freeze them so none is running engine/
+  // GPU/fs code while __libnx_exit's __appExit deinits those services.
+  thread_registry_pause_others();
+  // Return to the homebrew loader the way libnx does (and the HL2 port does): run
+  // libnx's own service cleanup and hand control back to hbl -> the forwarder, WITHOUT
+  // newlib atexit / C++ static destructors (the engine's crashy teardown). A hard
+  // svcExitProcess() instead terminates the whole forwarder process, which the
+  // forwarder reports as an error. Never returns.
+  extern void NX_NORETURN __libnx_exit(int rc);
+  __libnx_exit(0);
+}
+
 int main(void) {
   // full clock for boot; dropped once the menu has rendered
   cpu_boost(1);
@@ -433,10 +471,12 @@ int main(void) {
   setenv("MESA_GLTHREAD", "false", 1);
   setenv("GALLIUM_THREAD", "0", 1);
 
-  // load config (defaults if absent), then write it back so newly-added keys
-  // like xbox_layout always show up in the config file for editing
-  read_config(CONFIG_NAME);
-  write_config(CONFIG_NAME);
+  if (read_config(CONFIG_NAME) < 0)
+    write_config(CONFIG_NAME);
+
+  // Hold ZR at launch to open the mod-settings menu (libnx console). Runs before
+  // patch_game() so toggles apply this same boot. No-op unless ZR is held.
+  settings_menu_maybe_show();
 
   check_syscalls();
   check_data();
@@ -554,15 +594,10 @@ int main(void) {
       svcSleepThread((frame_ticks - used) * 1000000000ULL / tick_freq);
   }
 
-  implOnPause(fake_env, NULL);
-  implOnSurfaceDestroyed(fake_env, NULL);
-  implOnActivityDestroyed(fake_env, NULL);
-
-  deinit_openal();
-  socketExit();
-
-  extern void NX_NORETURN __libnx_exit(int rc);
-  __libnx_exit(0);
+  // Fallback for the JNI "quit"/"finish" path (which sets jni_quit_requested and
+  // lets the loop drain). The pause-menu Exit item calls hard_exit() synchronously
+  // from OnExit instead (matching the Vita loader), so it never reaches here.
+  hard_exit();
 
   return 0;
 }
