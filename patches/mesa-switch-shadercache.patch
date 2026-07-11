@@ -1,0 +1,403 @@
+diff --git a/include/c11/threads.h b/include/c11/threads.h
+index b512521535f..25ef672d00f 100644
+--- a/include/c11/threads.h
++++ b/include/c11/threads.h
+@@ -43,7 +43,7 @@
+ 
+ /*-------------------- 7.25.7 Time functions --------------------*/
+ // 7.25.6.1
+-#ifndef HAVE_TIMESPEC_GET
++#if !defined(HAVE_TIMESPEC_GET) && !defined(__SWITCH__)
+ #include <sys/time.h>
+ 
+ static inline int
+diff --git a/meson.build b/meson.build
+index 0ed24fd6fcc..eec1594056e 100644
+--- a/meson.build
++++ b/meson.build
+@@ -808,9 +808,8 @@ endif
+ has_mako = run_command(
+   prog_python, '-c',
+   '''
+-from distutils.version import StrictVersion
+ import mako
+-assert StrictVersion(mako.__version__) > StrictVersion("0.8.0")
++assert [int(x) for x in mako.__version__.split(".")[:2]] >= [0, 8]
+   ''')
+ if has_mako.returncode() != 0
+   error('Python (3.x) mako module >= 0.8.0 required to build mesa.')
+@@ -833,7 +832,7 @@ endif
+ with_shader_cache = false
+ _shader_cache = get_option('shader-cache')
+ if _shader_cache != 'false'
+-  if ['windows','horizon'].contains(host_machine.system())
++  if ['windows'].contains(host_machine.system())
+     if _shader_cache == 'true'
+       error('Shader Cache does not currently work on Windows')
+     endif
+diff --git a/src/gallium/drivers/nouveau/nouveau_screen.c b/src/gallium/drivers/nouveau/nouveau_screen.c
+index 22fdb9f8ccd..480c85e8f34 100644
+--- a/src/gallium/drivers/nouveau/nouveau_screen.c
++++ b/src/gallium/drivers/nouveau/nouveau_screen.c
+@@ -154,8 +154,19 @@ nouveau_disk_cache_create(struct nouveau_screen *screen)
+ 
+    _mesa_sha1_init(&ctx);
+    if (!disk_cache_get_function_identifier(nouveau_disk_cache_create,
+-                                           &ctx))
++                                           &ctx)) {
++#ifdef __SWITCH__
++      /* Horizon has no working dl_iterate_phdr / build-id at runtime, so the
++       * generic identifier fails and the on-disk shader cache (plus program
++       * binaries, which Mesa gates on the same cache) never gets created.
++       * Seed a fixed, stable id instead so the cache works. Bump the version
++       * suffix, or clear the cache dir, when shader generation changes. */
++      static const char switch_cache_id[] = "switch-nouveau-shadercache-v1";
++      _mesa_sha1_update(&ctx, switch_cache_id, sizeof(switch_cache_id) - 1);
++#else
+       return;
++#endif
++   }
+ 
+    _mesa_sha1_final(&ctx, sha1);
+    disk_cache_format_hex_id(cache_id, sha1, 20 * 2);
+diff --git a/src/mapi/glapi/gen/glX_XML.py b/src/mapi/glapi/gen/glX_XML.py
+index ff0011bf9ce..f3ee7b207d9 100644
+--- a/src/mapi/glapi/gen/glX_XML.py
++++ b/src/mapi/glapi/gen/glX_XML.py
+@@ -48,7 +48,7 @@ class glx_enum(gl_XML.gl_enum):
+ 
+         self.functions = {}
+ 
+-        for child in element.getchildren():
++        for child in list(element):
+             if child.tag == "size":
+                 n = child.get( "name" )
+                 c = child.get( "count" )
+@@ -130,7 +130,7 @@ class glx_function(gl_XML.gl_function):
+                     self.counter_list.append(param.counter)
+ 
+ 
+-        for child in element.getchildren():
++        for child in list(element):
+             if child.tag == "glx":
+                 rop = child.get( 'rop' )
+                 sop = child.get( 'sop' )
+diff --git a/src/mapi/glapi/gen/gl_XML.py b/src/mapi/glapi/gen/gl_XML.py
+index 7f1edbde9dd..afc43d83728 100644
+--- a/src/mapi/glapi/gen/gl_XML.py
++++ b/src/mapi/glapi/gen/gl_XML.py
+@@ -716,7 +716,7 @@ class gl_function( gl_item ):
+ 
+         parameters = []
+         return_type = "void"
+-        for child in element.getchildren():
++        for child in list(element):
+             if child.tag == "return":
+                 return_type = child.get( "type", "void" )
+             elif child.tag == "param":
+@@ -746,7 +746,7 @@ class gl_function( gl_item ):
+                 if param.is_image():
+                     self.images.append( param )
+ 
+-        if element.getchildren():
++        if list(element):
+             self.initialized = 1
+             self.entry_point_parameters[name] = parameters
+         else:
+@@ -876,7 +876,7 @@ class gl_api(object):
+ 
+ 
+     def process_OpenGLAPI(self, file_name, element):
+-        for child in element.getchildren():
++        for child in list(element):
+             if child.tag == "category":
+                 self.process_category( child )
+             elif child.tag == "OpenGLAPI":
+@@ -896,7 +896,7 @@ class gl_api(object):
+         [cat_type, key] = classify_category(cat_name, cat_number)
+         self.categories[cat_type][key] = [cat_name, cat_number]
+ 
+-        for child in cat.getchildren():
++        for child in list(cat):
+             if child.tag == "function":
+                 func_name = real_function_name( child )
+ 
+diff --git a/src/util/disk_cache.c b/src/util/disk_cache.c
+index a92d621927a..6c3072d55b3 100644
+--- a/src/util/disk_cache.c
++++ b/src/util/disk_cache.c
+@@ -31,7 +31,9 @@
+ #include <sys/file.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++#ifndef __SWITCH__
+ #include <sys/mman.h>
++#endif
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <pwd.h>
+@@ -55,6 +57,23 @@
+ 
+ #include "disk_cache.h"
+ 
++/* Shader-cache diagnostics (disabled). Change the `0` below to `1` to re-enable
++ * logging of CREATE / GET HIT|MISS / PUT / PUTOK to /switch/gtasa/cache_log.txt. */
++#if 0 && defined(__SWITCH__)
++#include <stdarg.h>
++static void switch_cache_log(const char *fmt, ...) {
++   static FILE *f = NULL;
++   static int tried = 0;
++   if (!tried) { tried = 1; f = fopen("/switch/gtasa/cache_log.txt", "w"); }
++   if (!f) return;
++   va_list ap; va_start(ap, fmt); vfprintf(f, fmt, ap); va_end(ap);
++   fflush(f);
++}
++#define SWLOG(...) switch_cache_log(__VA_ARGS__)
++#else
++#define SWLOG(...) ((void)0)
++#endif
++
+ /* Number of bits to mask off from a cache key to get an index. */
+ #define CACHE_INDEX_KEY_BITS 16
+ 
+@@ -331,10 +350,22 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
+     * guarantees of the cryptographic hash, a corrupt entry is
+     * unlikely to ever match a real cache key).
+     */
++#ifdef __SWITCH__
++   /* Horizon has no mmap. Keep the index in a heap buffer instead; shader
++    * blobs are stored as individual files so they still persist across runs.
++    * Only the size/key index is non-persistent (rebuilt each run). */
++   cache->index_mmap = calloc(1, size);
++   if (!cache->index_mmap)
++      goto path_fail;
++   lseek(fd, 0, SEEK_SET);
++   ssize_t index_rd = read(fd, cache->index_mmap, size);
++   (void)index_rd; /* keep the zero-initialised buffer on a short/failed read */
++#else
+    cache->index_mmap = mmap(NULL, size, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, fd, 0);
+    if (cache->index_mmap == MAP_FAILED)
+       goto path_fail;
++#endif
+    cache->index_mmap_size = size;
+ 
+    cache->size = (uint64_t *) cache->index_mmap;
+@@ -385,10 +416,14 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
+     * The queue will resize automatically when it's full, so adding new jobs
+     * doesn't stall.
+     */
++#ifndef __SWITCH__
+    util_queue_init(&cache->cache_queue, "disk$", 32, 4,
+                    UTIL_QUEUE_INIT_RESIZE_IF_FULL |
+                    UTIL_QUEUE_INIT_USE_MINIMUM_PRIORITY |
+                    UTIL_QUEUE_INIT_SET_FULL_THREAD_AFFINITY);
++#endif
++   /* __SWITCH__: no util_queue background threads (Mesa workers hang at init on
++    * Horizon); disk_cache_put runs the write synchronously instead. */
+ 
+    cache->path_init_failed = false;
+ 
+@@ -428,10 +463,17 @@ disk_cache_create(const char *gpu_name, const char *driver_id,
+    DRV_KEY_CPY(drv_key_blob, &driver_flags, driver_flags_size)
+ 
+    /* Seed our rand function */
++#ifdef __SWITCH__
++   /* /dev/urandom doesn't exist on Horizon; use the non-randomised seed path. */
++   s_rand_xorshift128plus(cache->seed_xorshift128plus, false);
++#else
+    s_rand_xorshift128plus(cache->seed_xorshift128plus, true);
++#endif
+ 
+    ralloc_free(local);
+ 
++   SWLOG("CREATE path_init_failed=%d path=%s\n", cache->path_init_failed,
++         cache->path ? cache->path : "(null)");
+    return cache;
+ 
+  fail:
+@@ -446,9 +488,15 @@ void
+ disk_cache_destroy(struct disk_cache *cache)
+ {
+    if (cache && !cache->path_init_failed) {
++#ifndef __SWITCH__
+       util_queue_finish(&cache->cache_queue);
+       util_queue_destroy(&cache->cache_queue);
++#endif
++#ifdef __SWITCH__
++      free(cache->index_mmap);
++#else
+       munmap(cache->index_mmap, cache->index_mmap_size);
++#endif
+    }
+ 
+    ralloc_free(cache);
+@@ -457,7 +505,9 @@ disk_cache_destroy(struct disk_cache *cache)
+ void
+ disk_cache_wait_for_idle(struct disk_cache *cache)
+ {
++#ifndef __SWITCH__
+    util_queue_finish(&cache->cache_queue);
++#endif
+ }
+ 
+ /* Return a filename within the cache's directory corresponding to 'key'. The
+@@ -904,6 +954,8 @@ cache_put(void *job, int thread_index)
+    unsigned i = 0;
+    char *filename = NULL, *filename_tmp = NULL;
+    struct disk_cache_put_job *dc_job = (struct disk_cache_put_job *) job;
++   SWLOG("PUT       %02x%02x%02x%02x  %zu bytes\n", dc_job->key[0],
++         dc_job->key[1], dc_job->key[2], dc_job->key[3], dc_job->size);
+ 
+    filename = get_cache_file(dc_job->cache, dc_job->key);
+    if (filename == NULL)
+@@ -920,8 +972,24 @@ cache_put(void *job, int thread_index)
+     * final destination filename, (to prevent any readers from seeing
+     * a partially written file).
+     */
++#ifdef __SWITCH__
++   /* Horizon's FAT rename() returns EIO, so write straight to the final file
++    * (single process => no atomic-rename race). Bail if it already exists so we
++    * don't needlessly rewrite a cached entry. */
++   filename_tmp = strdup(filename);
++   if (filename_tmp == NULL)
++      goto done;
++   {
++      int probe = open(filename, O_RDONLY | O_CLOEXEC);
++      if (probe != -1) {
++         close(probe);
++         goto done;
++      }
++   }
++#else
+    if (asprintf(&filename_tmp, "%s.tmp", filename) == -1)
+       goto done;
++#endif
+ 
+    fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
+ 
+@@ -933,8 +1001,10 @@ cache_put(void *job, int thread_index)
+       make_cache_file_directory(dc_job->cache, dc_job->key);
+ 
+       fd = open(filename_tmp, O_WRONLY | O_CLOEXEC | O_CREAT, 0644);
+-      if (fd == -1)
++      if (fd == -1) {
++         SWLOG("PUT FAIL@open errno=%d %s\n", errno, filename_tmp);
+          goto done;
++      }
+    }
+ 
+    /* With the temporary file open, we take an exclusive flock on
+@@ -942,9 +1012,11 @@ cache_put(void *job, int thread_index)
+     * open with the flock held. So just let that file be responsible
+     * for writing the file.
+     */
+-#ifdef HAVE_FLOCK
++#if defined(HAVE_FLOCK)
+    err = flock(fd, LOCK_EX | LOCK_NB);
+-#else
++   if (err == -1)
++      goto done;
++#elif !defined(__SWITCH__)
+    struct flock lock = {
+       .l_start = 0,
+       .l_len = 0, /* entire file */
+@@ -952,9 +1024,14 @@ cache_put(void *job, int thread_index)
+       .l_whence = SEEK_SET
+    };
+    err = fcntl(fd, F_SETLK, &lock);
+-#endif
+    if (err == -1)
+       goto done;
++#else
++   /* Horizon has no POSIX record locking (fcntl F_SETLK returns -1), and it's a
++    * single-process system anyway, so skip locking -- otherwise every cache_put
++    * aborts here before writing and every get misses. */
++   (void)err;
++#endif
+ 
+    /* Now that we have the lock on the open temporary file, we can
+     * check to see if the destination file already exists. If so,
+@@ -962,11 +1039,14 @@ cache_put(void *job, int thread_index)
+     * didn't exist and now. In this case, we don't do anything more,
+     * (to ensure the size accounting of the cache doesn't get off).
+     */
++#ifndef __SWITCH__
+    fd_final = open(filename, O_RDONLY | O_CLOEXEC);
+    if (fd_final != -1) {
++      SWLOG("PUT skip(exists) %s\n", filename);
+       unlink(filename_tmp);
+       goto done;
+    }
++#endif
+ 
+    /* OK, we're now on the hook to write out a file that we know is
+     * not in the cache, and is also not being written out to the cache
+@@ -1033,24 +1113,37 @@ cache_put(void *job, int thread_index)
+    size_t file_size = deflate_and_write_to_disk(dc_job->data, dc_job->size,
+                                                 fd, filename_tmp);
+    if (file_size == 0) {
++      SWLOG("PUT FAIL@deflate %s\n", filename_tmp);
+       unlink(filename_tmp);
+       goto done;
+    }
++#ifndef __SWITCH__
+    ret = rename(filename_tmp, filename);
+    if (ret == -1) {
++      SWLOG("PUT FAIL@rename errno=%d tmp=%s\n", errno, filename_tmp);
+       unlink(filename_tmp);
+       goto done;
+    }
++#endif
+ 
+    struct stat sb;
+    if (stat(filename, &sb) == -1) {
++#ifdef __SWITCH__
++      /* Horizon's FAT stat() can spuriously return EIO right after a write even
++       * though the file is intact. Keep the file; just skip size accounting
++       * (no eviction on Switch anyway). */
++      SWLOG("PUTOK(no-stat) %s\n", filename);
++#else
++      SWLOG("PUT FAIL@stat errno=%d %s\n", errno, filename);
+       /* Something went wrong remove the file */
+       unlink(filename);
+       goto done;
++#endif
++   } else {
++      SWLOG("PUTOK     %s\n", filename);
++      p_atomic_add(dc_job->cache->size, sb.st_blocks * 512);
+    }
+ 
+-   p_atomic_add(dc_job->cache->size, sb.st_blocks * 512);
+-
+  done:
+    if (fd_final != -1)
+       close(fd_final);
+@@ -1080,9 +1173,15 @@ disk_cache_put(struct disk_cache *cache, const cache_key key,
+       create_put_job(cache, key, data, size, cache_item_metadata);
+ 
+    if (dc_job) {
++#ifdef __SWITCH__
++      /* No util_queue on Horizon: write synchronously in the calling thread. */
++      cache_put(dc_job, 0);
++      destroy_put_job(dc_job, 0);
++#else
+       util_queue_fence_init(&dc_job->fence);
+       util_queue_add_job(&cache->cache_queue, dc_job, &dc_job->fence,
+                          cache_put, destroy_put_job, dc_job->size);
++#endif
+    }
+ }
+ 
+@@ -1256,9 +1355,11 @@ disk_cache_get(struct disk_cache *cache, const cache_key key, size_t *size)
+    if (size)
+       *size = cf_data.uncompressed_size;
+ 
++   SWLOG("GET  HIT  %02x%02x%02x%02x\n", key[0], key[1], key[2], key[3]);
+    return uncompressed_data;
+ 
+  fail:
++   SWLOG("GET  MISS %02x%02x%02x%02x\n", key[0], key[1], key[2], key[3]);
+    if (data)
+       free(data);
+    if (uncompressed_data)

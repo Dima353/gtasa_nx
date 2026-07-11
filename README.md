@@ -83,6 +83,23 @@ You're going to need devkitA64 and the following packages/libraries:
 * `switch-openal-soft`
 * `devkitpro-pkgbuild-helpers`
 
+**Patched Mesa (required for the persistent shader cache):** the stock
+`switch-mesa` ships with the on-disk shader cache disabled on Horizon, so
+compiled shaders are recompiled every launch (stutter). Before `make`, rebuild
+Mesa with our patch:
+
+```sh
+bash scripts/build-mesa.sh
+```
+
+This clones the devkitPro Mesa fork at the pinned commit, applies
+`patches/mesa-switch-shadercache.patch` (enables the cache and adapts
+`disk_cache.c` to Horizon: no `mmap`/`flock`/`rename`-on-FAT, fixed cache id),
+builds it with `-Dshader-cache=true` and installs it over the stock portlib. The
+CI workflow (`.github/workflows/build.yml`) runs this automatically. Requires
+`meson`, `ninja`, `bison`, `flex`, `python3-mako` and the `dkp-meson-scripts`
+package.
+
 Then run `make` (with `DEVKITPRO` set in the environment).
 
 ### Credits

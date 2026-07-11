@@ -1,0 +1,9 @@
+# Build output
+build/
+*.nro
+*.elf
+*.nacp
+*.map
+
+# Patched-Mesa build tree created by scripts/build-mesa.sh
+mesa-build/
