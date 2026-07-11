@@ -8,8 +8,8 @@
 # Our patch (patches/mesa-switch-shadercache.patch) enables the cache and adapts
 # disk_cache.c to Horizon so compiled shaders persist across launches.
 #
-# Meant to run inside the devkitpro/devkita64 CI container (Ubuntu, as root),
-# but works on any Linux devkitPro install. Run BEFORE `make`.
+# Works both in the devkitpro/devkita64 CI container (Ubuntu, apt) and in the
+# devkitPro MSYS2 shell on Windows (pacman). Run BEFORE `make`.
 set -euo pipefail
 
 # Exact commit the stock switch-mesa (20.1.0) package is built from. Keep in sync
@@ -20,12 +20,29 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH="${SCRIPT_DIR}/../patches/mesa-switch-shadercache.patch"
 : "${DEVKITPRO:=/opt/devkitpro}"
 
+# The devkitPro pacman is `dkp-pacman` in the Linux container but plain `pacman`
+# in the MSYS2 shell.
+if command -v dkp-pacman >/dev/null 2>&1; then
+  DKP_PACMAN=dkp-pacman
+else
+  DKP_PACMAN=pacman
+fi
+
 echo "==> Installing Mesa build dependencies"
-apt-get update
-apt-get install -y --no-install-recommends \
-  git meson ninja-build bison flex python3-mako python3-setuptools
-# dkp-meson-scripts provides /opt/devkitpro/meson-cross.sh
-dkp-pacman -S --noconfirm --needed \
+if command -v apt-get >/dev/null 2>&1; then
+  # Debian/Ubuntu (CI container)
+  apt-get update
+  apt-get install -y --no-install-recommends \
+    git meson ninja-build bison flex python3-mako python3-setuptools
+elif command -v pacman >/dev/null 2>&1; then
+  # MSYS2 (devkitPro on Windows) -- different package names
+  pacman -S --noconfirm --needed \
+    git meson ninja bison flex python-mako python-setuptools
+else
+  echo "No apt-get or pacman found; install meson/ninja/bison/flex/python-mako manually." >&2
+fi
+# dkp-meson-scripts provides ${DEVKITPRO}/meson-cross.sh
+"${DKP_PACMAN}" -S --noconfirm --needed \
   dkp-meson-scripts dkp-toolchain-vars switch-pkg-config
 
 echo "==> Fetching Mesa ${MESA_COMMIT} (shallow)"
