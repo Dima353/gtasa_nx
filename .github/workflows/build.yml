@@ -33,6 +33,11 @@ jobs:
             switch-ffmpeg \
             switch-openal-soft
 
+      - name: Build patched Mesa (persistent shader cache)
+        run: bash scripts/build-mesa.sh
+        env:
+          DEVKITPRO: /opt/devkitpro
+
       - name: Build
         run: make
         env:

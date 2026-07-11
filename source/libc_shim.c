@@ -210,6 +210,27 @@ long sysconf_fake(int name) {
   }
 }
 
+// Real libc symbols referenced by Mesa's disk_cache.c (shader cache) that
+// Horizon/newlib doesn't provide. Stubs suffice: the cache dir comes from
+// MESA_GLSL_CACHE_DIR (the getpwuid path is never taken), getuid()==geteuid()
+// keeps the cache enabled, and fstatat()->-1 just skips LRU eviction.
+#include <pwd.h>
+uid_t getuid(void)  { return 0; }
+uid_t geteuid(void) { return 0; }
+long sysconf(int name) { return sysconf_fake(name); }
+int getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen,
+               struct passwd **result) {
+  (void)uid; (void)pwd; (void)buf; (void)buflen;
+  *result = NULL;
+  return 0;
+}
+int dirfd(DIR *dirp) { (void)dirp; return -1; }
+int fstatat(int fd, const char *path, struct stat *st, int flag) {
+  (void)fd; (void)path; (void)st; (void)flag;
+  errno = ENOSYS;
+  return -1;
+}
+
 long pathconf_fake(const char *path, int name) {
   (void)path; (void)name;
   return -1;

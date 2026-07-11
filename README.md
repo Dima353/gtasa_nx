@@ -75,15 +75,34 @@ If you don't hold ZR, the game boots normally.
 
 ### How to build
 
-You're going to need devkitA64 and the following packages/libraries:
-* `switch-mesa`
-* `switch-libdrm_nouveau`
-* `switch-sdl2`
-* `switch-mpg123`
-* `switch-openal-soft`
-* `devkitpro-pkgbuild-helpers`
+You need **devkitA64** with `DEVKITPRO` set in the environment. The full flow is
+three steps; the CI workflow (`.github/workflows/build.yml`) does exactly the same.
 
-Then run `make` (with `DEVKITPRO` set in the environment).
+**1. Install the Switch portlibs:**
+
+```sh
+dkp-pacman -S switch-mesa switch-libdrm_nouveau switch-sdl2 switch-mpg123 switch-openal-soft devkitpro-pkgbuild-helpers
+```
+
+**2. Build the patched Mesa** (required — the stock `switch-mesa` ships with the
+on-disk shader cache disabled on Horizon, so shaders are recompiled every launch,
+causing stutter). This rebuilds `switch-mesa` from the devkitPro Mesa fork with
+`patches/mesa-switch-shadercache.patch` and installs it over the stock portlib:
+
+```sh
+bash scripts/build-mesa.sh
+```
+
+The script installs its own Mesa build dependencies — `meson`, `ninja`, `bison`,
+`flex`, `python3-mako` (via `apt`) and `dkp-meson-scripts`, `dkp-toolchain-vars`,
+`switch-pkg-config` (via `dkp-pacman`). Re-run it only when the patch or the
+pinned Mesa commit changes.
+
+**3. Build the `.nro`:**
+
+```sh
+make
+```
 
 ### Credits
 
