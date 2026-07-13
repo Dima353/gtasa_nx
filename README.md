@@ -89,7 +89,9 @@ dkp-pacman -S switch-mesa switch-libdrm_nouveau switch-sdl2 switch-mpg123 switch
 **2. Build the patched Mesa** (required — the stock `switch-mesa` ships with the
 on-disk shader cache disabled on Horizon, so shaders are recompiled every launch,
 causing stutter). This rebuilds `switch-mesa` from the devkitPro Mesa fork with
-`patches/mesa-switch-shadercache.patch` and installs it over the stock portlib:
+`patches/mesa-switch-shadercache.patch` and stages it in a project-local
+`mesa-install/` dir that `make` links automatically — your system `switch-mesa`
+is left untouched:
 
 ```sh
 bash scripts/build-mesa.sh
