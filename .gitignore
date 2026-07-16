@@ -5,5 +5,6 @@ build/
 *.nacp
 *.map
 
-# Patched-Mesa build tree created by scripts/build-mesa.sh
+# Patched-Mesa build tree + staged install created by scripts/build-mesa.sh
 mesa-build/
+mesa-install/

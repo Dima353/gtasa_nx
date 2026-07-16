@@ -40,7 +40,7 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE	:=	GTA San Andreas
 APP_AUTHOR	:=	naga
-APP_VERSION	:=	1.0.1
+APP_VERSION	:=	1.0.2
 BUILD		:=	build
 SOURCES		:=	source source/hooks
 DATA		:=	data
@@ -74,7 +74,9 @@ LIBS	:= -lopenal -lSDL2 -lmpg123 \
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+# When scripts/build-mesa.sh has staged the shader-cache Mesa, link it from the
+# project-local dir first; falls back to the stock switch-mesa portlib if absent.
+LIBDIRS	:= $(wildcard $(CURDIR)/mesa-install/opt/devkitpro/portlibs/switch) $(PORTLIBS) $(LIBNX)
 
 
 #---------------------------------------------------------------------------------

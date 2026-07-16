@@ -20,6 +20,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PATCH="${SCRIPT_DIR}/../patches/mesa-switch-shadercache.patch"
 : "${DEVKITPRO:=/opt/devkitpro}"
 
+# Stage the patched Mesa into a project-local dir instead of over the system
+# portlib, so it never clobbers the toolchain's stock switch-mesa (which the
+# user's other Switch ports link). The Makefile auto-detects and links it here.
+MESA_INSTALL="$(cd "${SCRIPT_DIR}/.." && pwd)/mesa-install"
+
 # The devkitPro pacman is `dkp-pacman` in the Linux container but plain `pacman`
 # in the MSYS2 shell.
 if command -v dkp-pacman >/dev/null 2>&1; then
@@ -61,7 +66,9 @@ echo "==> Configuring + building Mesa (shader-cache enabled)"
 "${DEVKITPRO}/meson-cross.sh" switch crossfile.txt build -Db_ndebug=true -Dshader-cache=true
 ninja -C build
 
-echo "==> Installing patched Mesa over the portlib"
-ninja -C build install
+echo "==> Staging patched Mesa into ${MESA_INSTALL} (system portlibs untouched)"
+rm -rf "${MESA_INSTALL}"
+DESTDIR="${MESA_INSTALL}" ninja -C build install
 
-echo "==> Done: patched switch-mesa installed."
+echo "==> Done: patched switch-mesa staged at ${MESA_INSTALL}."
+echo "    Run 'make' to build the .nro (it links this staged Mesa automatically)."
