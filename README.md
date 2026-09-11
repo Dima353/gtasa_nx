@@ -36,20 +36,19 @@ game data folders (`data/`, `models/`, `texdb/`, `audio/`, …) all inside
 
 ### Notes
 
-Low Performance : CPU-bound on draw calls, the game issues a lot of GL calls per frame and Switch mesa driver is slow per-call and the GPU sits idle most of the time 
-Best lever today is CPU overclock a real fix would need a thinner/threaded GL driver
-
 This will not work in applet/album mode (it needs the full memory + syscall set).
 Launch it through a **game override** (hold R on an installed title) or a
 forwarder.
 
 Save games and settings are stored in `/switch/gtasa/`.
 
-The port has a config file at `/switch/gtasa/config.txt`, created on first run:
+The port has a config file at `/switch/gtasa/gtasa_nx.cfg`, created on first run:
 * `screen_width` / `screen_height` — render resolution; `-1` picks 1280x720 in
   handheld and 1920x1080 docked
 * `trilinear_filter` — `1` forces trilinear texture filtering
 * `show_fps` — `1` draws a small FPS counter in the top-left corner
+* `fps_cap_30` — `1` enables the wrapper's 30 FPS cap
+* `auto_boot_delay` — launcher countdown in seconds (`1`, `3`, `5`, or `10`)
 * `ps2_corona_rotation` — `1` PS2 Corona Sun
 * `ps2_color_filter` — `1` PS2 Color filter
 * `sprint_any_surface` — `0` Sprinting on any surface is allowed
@@ -65,44 +64,23 @@ The port has a config file at `/switch/gtasa/config.txt`, created on first run:
 - Due to expired licensing, some songs were cut from the game. See [MUSIC.md](MUSIC.md) for a list of removed tracks and a guide on how to restore them.
 - Console-style HUD (optional). Drop a custom `Adjustable.cfg` into `switch/gtasa/` for the console HUD (e.g. radar in the bottom-left corner). Since **v2.11.311** no longer includes `data/360Default1280x720.cfg`, take it from the older **v2.10** build and rename it to `Adjustable.cfg`. It's a leftover from the Xbox 360 version.
 - In order to reduce occasional stutters in-game, delete both `switch/gtasa/scache_small_low.txt` and `switch/gtasa/scache_small.txt`, then create a copy of the `switch/gtasa/scache.txt` file to have two version of it. (for example `scache(1).txt` so in the end you end up with both `scache.txt` and `scache(1).txt` inside the `switch/gtasa/` folder), then rename `scache.txt` to `scache_small.txt` and `scache(1).txt` to `scache_small_low.txt` . This will however make the loading screen longer since it needs to compile more shaders ahead.
-  - If the folder `switch/gtasa/shadercache/mesa_shader_cache` contains much more than 300 folders, it's recommended to delete the folder and have it rebuilt.
+  - Mesa stores its persistent single-file shader cache under `switch/gtasa/shadercache/mesa_shader_cache_sf`. Delete that directory only when diagnosing a corrupt cache.
 
 ### Mod Settings Menu
 
-The port includes a built-in configurator for toggling the mod's fixes and features.
-
-**To open it:** at launch, a splash screen appears for ~3 seconds
-("Hold ZR for Mod Settings"). **Hold ZR** during this window to enter the menu.
-If you don't hold ZR, the game boots normally.
+The SDL launcher opens on every boot with the game cover centered. Select the
+cover to launch, or open **Options** to change the port's fixes and features.
+Changes are saved immediately to `gtasa_nx.cfg`.
 
 ### How to build
-
-You need **devkitA64** with `DEVKITPRO` set in the environment. The full flow is
-three steps; the CI workflow (`.github/workflows/build.yml`) does exactly the same.
 
 **1. Install the Switch portlibs:**
 
 ```sh
-dkp-pacman -S switch-mesa switch-libdrm_nouveau switch-sdl2 switch-mpg123 switch-openal-soft devkitpro-pkgbuild-helpers
+dkp-pacman -S switch-sdl2 switch-sdl2_image switch-mpg123 switch-ffmpeg switch-openal-soft switch-libexpat switch-libzstd switch-zlib
 ```
 
-**2. Build the patched Mesa** (required — the stock `switch-mesa` ships with the
-on-disk shader cache disabled on Horizon, so shaders are recompiled every launch,
-causing stutter). This rebuilds `switch-mesa` from the devkitPro Mesa fork with
-`patches/mesa-switch-shadercache.patch` and stages it in a project-local
-`mesa-install/` dir that `make` links automatically — your system `switch-mesa`
-is left untouched:
-
-```sh
-bash scripts/build-mesa.sh
-```
-
-The script installs its own Mesa build dependencies — `meson`, `ninja`, `bison`,
-`flex`, `python3-mako` (via `apt`) and `dkp-meson-scripts`, `dkp-toolchain-vars`,
-`switch-pkg-config` (via `dkp-pacman`). Re-run it only when the patch or the
-pinned Mesa commit changes.
-
-**3. Build the `.nro`:**
+**2. Build the `.nro`:**
 
 ```sh
 make
@@ -114,7 +92,6 @@ make
 * fgsfds for max_nx, which the shared Switch platform layer is based on;
 * Gameplay and engine improvements ported from the [GTA:SA PS Vita port](https://github.com/TheOfficialFloW/gtasa_vita).
 * Extra patches and hooks adapted from [JPatch](https://github.com/AndroidModLoader/JPatch).
-* See the [CHANGELOG.md](CHANGELOG.md) for everything that changed.
 
 ### Support
 

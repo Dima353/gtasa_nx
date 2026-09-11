@@ -1,12 +1,12 @@
-name: Build gtasa_nx.nro
+name: Build GTA SA release
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
     inputs:
+      mesa_sdk_url:
+        description: 'URL of the Mesa 26.2 unified Horizon SDK zip.'
+        required: true
+        type: string
       version:
         description: 'Release version. Leave it empty to avoid publishing a release.'
         required: false
@@ -26,17 +26,25 @@ jobs:
       - name: Install required Switch libraries
         run: |
           dkp-pacman -S --noconfirm --needed \
-            switch-mesa \
-            switch-libdrm_nouveau \
             switch-sdl2 \
             switch-mpg123 \
             switch-ffmpeg \
-            switch-openal-soft
+            switch-openal-soft \
+            switch-libexpat \
+            switch-libzstd \
+            switch-zlib
 
-      - name: Build patched Mesa (persistent shader cache)
-        run: bash scripts/build-mesa.sh
+      - name: Stage unified Mesa SDK
         env:
-          DEVKITPRO: /opt/devkitpro
+          MESA_SDK_URL: ${{ inputs.mesa_sdk_url }}
+          MESA_SDK_SHA256: 29AB2E0DED0CF7C74014D9C0FDBF1A27B6682FFD0E9ECCC1A1688F8F17F09411
+        run: |
+          curl --fail --location --retry 3 "$MESA_SDK_URL" --output /tmp/mesa-sdk.zip
+          echo "$MESA_SDK_SHA256 */tmp/mesa-sdk.zip" | sha256sum --check --strict
+          mkdir -p mesa-install
+          python3 -m zipfile -e /tmp/mesa-sdk.zip mesa-install
+          test -f mesa-install/opt/devkitpro/portlibs/switch/lib/libEGL.a
+          test -f mesa-install/opt/devkitpro/portlibs/switch/lib/libGLESv2.a
 
       - name: Build
         run: make

@@ -87,6 +87,31 @@ void set_thread_core(int core) {
     debugPrintf("affinity: pin to core %d failed: %08x\n", core, rc);
 }
 
+// Android AArch64 stack guards read their canary at TPIDR_EL0+0x28.
+#define MAX_GAME_TLS_THREADS 64
+#define GAME_TLS_SIZE 0x1000
+#define GAME_TLS_GUARD UINT64_C(0x4242424242424242)
+
+static uint8_t g_game_tls[MAX_GAME_TLS_THREADS][GAME_TLS_SIZE]
+    __attribute__((aligned(GAME_TLS_SIZE)));
+static unsigned g_game_tls_count;
+
+void *game_tls_install(void) {
+  unsigned slot = __atomic_fetch_add(&g_game_tls_count, 1, __ATOMIC_RELAXED);
+  if (slot >= MAX_GAME_TLS_THREADS) {
+    debugPrintf("TLS: exhausted %u dedicated game slots\n",
+                MAX_GAME_TLS_THREADS);
+    return NULL;
+  }
+
+  uint8_t *tls = g_game_tls[slot];
+  memset(tls, 0, GAME_TLS_SIZE);
+  const uint64_t guard = GAME_TLS_GUARD;
+  memcpy(tls + 0x28, &guard, sizeof(guard));
+  armSetTlsRw(tls);
+  return tls;
+}
+
 // --- thread registry (see util.h) -----------------------------------------
 #define MAX_TRACKED_THREADS 64
 static Handle g_thread_handles[MAX_TRACKED_THREADS];

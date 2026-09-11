@@ -28,6 +28,8 @@ void set_thread_core(int core);
 void thread_registry_add(void);
 void thread_registry_pause_others(void);
 
+void *game_tls_install(void);
+
 int ret0(void);
 int retm1(void);
 

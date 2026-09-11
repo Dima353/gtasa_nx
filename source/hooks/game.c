@@ -22,16 +22,6 @@
 
 extern so_module game_mod; // defined in main.c
 
-// fake TLS for the AArch64 stack guard: guarded functions read their cookie at
-// [TPIDR_EL0, #0x28], but libnx leaves TPIDR_EL0 unusable for that, so point it
-// at a static buffer (spawned threads get the same in pthread_create_fake).
-static uint8_t main_fake_tls[0x100];
-
-static void init_fake_tls(uint8_t *tls) {
-  memset(tls, 0, 0x100);
-  armSetTlsRw(tls);
-}
-
 // Always hand out the fake JNIEnv: our engine threads aren't attached through a
 // real JavaVM, so the stock TLS-cached env lookup would return garbage.
 void *NVThreadGetCurrentJNIEnv(void) {
@@ -46,18 +36,19 @@ typedef struct {
   void *(*func)(void *);
   void *arg;
   int core;
-  uint8_t tls[0x100];
 } NVThreadStart;
 
 static int nv_thread_trampoline(void *arg) {
   NVThreadStart *start = arg;
   void *(*func)(void *) = start->func;
   void *user_arg = start->arg;
-  set_thread_core(start->core);     // spread engine threads across cores
+  int core = start->core;
+  free(start);
+  set_thread_core(core);            // spread engine threads across cores
   thread_registry_add();            // track for freeze-on-exit
-  init_fake_tls(start->tls);
+  if (!game_tls_install())
+    return -1;
   void *rc = func(user_arg);
-  // tls stays in TPIDR_EL0 through teardown, so the block is leaked on purpose
   return (int)(intptr_t)rc;
 }
 
@@ -76,7 +67,9 @@ int NVThreadSpawnJNIThread(long *tid, const void *attr, const char *name,
   // CPU split: core 0 = logic, core 1 = GL render thread, core 2 = everything else
   start->core = (name && strcmp(name, "RenderQueue") == 0) ? 1 : 2;
   thrd_t thrd;
-  if (thrd_create(&thrd, nv_thread_trampoline, start) != thrd_success) {
+  // devkitA64 returns zero on success.
+  const int create_rc = thrd_create(&thrd, nv_thread_trampoline, start);
+  if (create_rc != 0) {
     free(start);
     return -1;
   }
@@ -169,6 +162,11 @@ static void (*CEntity__CleanUpOldReference)(void *entity, void **ref);
 static int  (*CGameLogic__IsCoopGameGoingOn)(void);
 static int  (*CHID__GetInputType)(void);
 static void *MobileSettings_settings;
+
+void keep_game_frame_limiter_off(void) {
+  if (MobileSettings_settings)
+    *(int *)((uint8_t *)MobileSettings_settings + 1216) = 0;
+}
 
 // Called from free_aim_stub.s when a lock-on target exists but isn't being cycled.
 __attribute__((visibility("hidden"))) void free_aim_maybe(void *playerPed) {
@@ -820,8 +818,14 @@ void patch_game(void) {
                (uintptr_t)MobileMenu__Update_hook);
   }
 
-  // main-thread stack-guard TLS
-  init_fake_tls(main_fake_tls);
+  if (!game_tls_install())
+    debugPrintf("TLS: failed to install main-thread game TLS\n");
+
+  // Keep the frame limiter under user control.
+  if (so_try_find_addr_rx(&game_mod, "_Z11DoGameStatef")) {
+    uint32_t *fn = (uint32_t *)so_find_addr(&game_mod, "_Z11DoGameStatef");
+    fn[0x734 / 4] = 0xD503201F;
+  }
 
   // Ignore app rating popup.
   if (so_try_find_addr_rx(&game_mod, "_Z12Menu_ShowNagv"))

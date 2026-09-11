@@ -2,6 +2,7 @@
 #define __HOOKS_H__
 
 void patch_game(void);
+void keep_game_frame_limiter_off(void);
 
 // Terminate the process, skipping the mobile engine's crashy teardown (see main.c).
 // Commits the SD first so any just-written save persists. Never returns.

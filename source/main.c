@@ -466,25 +466,21 @@ int main(void) {
   // full clock for boot; dropped once the menu has rendered
   cpu_boost(1);
 
-  // keep all GL on the render thread: a mesa worker thread issuing GL races
-  // nouveau's small-buffer allocator and corrupts its pool
-  setenv("MESA_GLTHREAD", "false", 1);
+  setenv("MESA_GLTHREAD", "true", 1);
   setenv("GALLIUM_THREAD", "0", 1);
+  setenv("NOUVEAU_SWITCH_MAPPED_COMPLETION", "1", 1);
 
-  // Persist Mesa's compiled-shader disk cache across launches (avoids recompiling
-  // every boot). Must be set before the game creates its GL context. Mesa 20.1
-  // uses the MESA_GLSL_CACHE_* names; needs -Wl,--build-id in LDFLAGS or Mesa
-  // can't key the cache and silently disables it.
   mkdir("/switch/gtasa/shadercache", 0777);
-  setenv("MESA_GLSL_CACHE_DIR", "/switch/gtasa/shadercache", 1);
-  setenv("MESA_GLSL_CACHE_DISABLE", "false", 1);
+  setenv("MESA_SHADER_CACHE_DIR", "/switch/gtasa/shadercache", 1);
+  setenv("MESA_SHADER_CACHE_DISABLE", "false", 1);
 
   if (read_config(CONFIG_NAME) < 0)
     write_config(CONFIG_NAME);
 
-  // Hold ZR at launch to open the mod-settings menu (libnx console). Runs before
-  // patch_game() so toggles apply this same boot. No-op unless ZR is held.
-  settings_menu_maybe_show();
+  if (!settings_menu_run()) {
+    cpu_boost(0);
+    return 0;
+  }
 
   check_syscalls();
   check_data();
@@ -570,6 +566,8 @@ int main(void) {
 
   const u64 tick_freq = armGetSystemTickFreq();
   u64 last_tick = armGetSystemTick();
+  const u64 frame_ticks = tick_freq / (config.fps_cap_30 ? 30 : 60);
+  u64 next_frame_tick = last_tick + frame_ticks;
   int boot_frames = 0;
 
   while (appletMainLoop() && !jni_quit_requested) {
@@ -588,18 +586,27 @@ int main(void) {
       dt = 1.0f / 60.0f;
 
     implOnDrawFrame(fake_env, NULL, dt);
+    if (config.fps_cap_30)
+      keep_game_frame_limiter_off();
 
     if (boot_frames < 10) {
       if (++boot_frames == 10)
         cpu_boost(0);
     }
 
-    // pace the loop to ~60fps: the engine renders on its own thread, so nothing
-    // here blocks on vsync and the loop would otherwise free-run
-    const u64 frame_ticks = tick_freq / 60;
-    const u64 used = armGetSystemTick() - now;
-    if (used < frame_ticks)
-      svcSleepThread((frame_ticks - used) * 1000000000ULL / tick_freq);
+    if (config.fps_cap_30) {
+      const u64 end = armGetSystemTick();
+      if (end < next_frame_tick) {
+        svcSleepThread((next_frame_tick - end) * 1000000000ULL / tick_freq);
+      } else if (end - next_frame_tick >= frame_ticks) {
+        next_frame_tick = end;
+      }
+      next_frame_tick += frame_ticks;
+    } else {
+      const u64 used = armGetSystemTick() - now;
+      if (used < frame_ticks)
+        svcSleepThread((frame_ticks - used) * 1000000000ULL / tick_freq);
+    }
   }
 
   // Fallback for the JNI "quit"/"finish" path (which sets jni_quit_requested and

@@ -40,12 +40,12 @@ include $(DEVKITPRO)/libnx/switch_rules
 TARGET		:=	$(notdir $(CURDIR))
 APP_TITLE	:=	GTA San Andreas
 APP_AUTHOR	:=	naga
-APP_VERSION	:=	1.0.2
+APP_VERSION	:=	1.0.4
 BUILD		:=	build
 SOURCES		:=	source source/hooks
 DATA		:=	data
 INCLUDES	:=	include
-#ROMFS	:=	romfs
+ROMFS		:=	romfs
 
 #---------------------------------------------------------------------------------
 # options for code generation
@@ -60,23 +60,22 @@ CFLAGS	+=	$(INCLUDE) -D__SWITCH__
 CXXFLAGS	:= $(CFLAGS)
 
 ASFLAGS	:=	-g $(ARCH)
-LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map) \
-			-Wl,--wrap=nouveau_mm_allocate -Wl,--wrap=nouveau_mm_free \
-			-Wl,--wrap=nouveau_mm_free_work \
-			-Wl,--build-id=sha1
+LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
 # mpg123 is needed since 2.1.131 (music streaming used to be in libVendor_mpg123.so)
 # install it with: pacman -S switch-mpg123
-LIBS	:= -lopenal -lSDL2 -lmpg123 \
-			-lEGL -lGLESv2 -lglapi -ldrm_nouveau -lz -lnx -lm
+LIBS	:= -lopenal -lSDL2_image -ljpeg -lpng -lwebp -lSDL2 -lmpg123 \
+			-lEGL -lGLESv2 -lglapi -lexpat -lzstd -lz -lnx -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-# When scripts/build-mesa.sh has staged the shader-cache Mesa, link it from the
-# project-local dir first; falls back to the stock switch-mesa portlib if absent.
-LIBDIRS	:= $(wildcard $(CURDIR)/mesa-install/opt/devkitpro/portlibs/switch) $(PORTLIBS) $(LIBNX)
+MESA_SDK_ROOT ?= $(TOPDIR)/mesa-install/opt/devkitpro/portlibs/switch
+ifeq ($(wildcard $(MESA_SDK_ROOT)/lib/libEGL.a),)
+$(error "Unified Mesa SDK not found at $(MESA_SDK_ROOT); see README.md")
+endif
+LIBDIRS	:= $(MESA_SDK_ROOT) $(PORTLIBS) $(LIBNX)
 
 
 #---------------------------------------------------------------------------------

@@ -236,89 +236,6 @@ static EGLBoolean eglMakeCurrent_dedup(EGLDisplay dpy, EGLSurface draw,
   return r;
 }
 
-// mesa nouveau_mm slab-allocator replacement (-Wl,--wrap): mesa's small-buffer
-// sub-allocator corrupts its slab pool under the world load, so replace it with
-// a bump-slab pool of large bos, sub-allocated linearly and never freed.
-// nouveau_mman layout { dev@0; bucket[15]; uint32_t domain@848; config@852 };
-// handle is malloc(24) { next@0; priv@8; uint32_t offset@16 }.
-extern int nouveau_bo_new(void *dev, uint32_t flags, uint32_t align,
-                          uint64_t size, const void *config, void **bo);
-extern int nouveau_bo_ref(void *bo, void **pref);
-
-#define NMM_DEV(c)    (*(void **)((char *)(c) + 0))
-#define NMM_DOMAIN(c) (*(uint32_t *)((char *)(c) + 848))
-#define NMM_CONFIG(c) ((const void *)((char *)(c) + 852))
-
-#define NMM_ALIGN      256u
-#define NMM_SLAB_BYTES (2u * 1024 * 1024)   // 2 MB per slab
-#define NMM_BIG_THRESH (512u * 1024)        // > this -> its own dedicated bo
-#define NMM_MAX_SLABS  1024
-
-struct nmm_slab { void *cache; void *bo; uint64_t size; uint64_t cur; };
-static struct nmm_slab g_nmm_slabs[NMM_MAX_SLABS];
-static int g_nmm_nslabs = 0;
-static pthread_mutex_t g_nmm_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-// dedicated, right-sized bo (mirrors mesa's >2MB path: NULL handle, *bo set)
-static void *nmm_dedicated(void *cache, uint32_t sz, void **bo, uint32_t *offset) {
-  void *nb = NULL;
-  if (nouveau_bo_new(NMM_DEV(cache), NMM_DOMAIN(cache), 0, sz, NMM_CONFIG(cache), &nb) || !nb)
-    nb = NULL;
-  if (bo) *bo = nb;
-  if (offset) *offset = 0;
-  return NULL;
-}
-
-void *__wrap_nouveau_mm_allocate(void *cache, uint32_t size, void **bo, uint32_t *offset) {
-  uint32_t asz = (size + (NMM_ALIGN - 1)) & ~(NMM_ALIGN - 1);
-  if (asz == 0) asz = NMM_ALIGN;
-  if (asz > NMM_BIG_THRESH)
-    return nmm_dedicated(cache, asz, bo, offset);
-
-  pthread_mutex_lock(&g_nmm_mtx);
-  struct nmm_slab *s = NULL;
-  for (int i = g_nmm_nslabs - 1; i >= 0; i--) {       // newest first (bump locality)
-    if (g_nmm_slabs[i].cache == cache &&
-        (g_nmm_slabs[i].size - g_nmm_slabs[i].cur) >= asz) { s = &g_nmm_slabs[i]; break; }
-  }
-  if (!s) {
-    if (g_nmm_nslabs >= NMM_MAX_SLABS) {              // table full -> dedicated bo
-      pthread_mutex_unlock(&g_nmm_mtx);
-      return nmm_dedicated(cache, asz, bo, offset);
-    }
-    void *nb = NULL;
-    if (nouveau_bo_new(NMM_DEV(cache), NMM_DOMAIN(cache), 0, NMM_SLAB_BYTES,
-                       NMM_CONFIG(cache), &nb) || !nb) {
-      pthread_mutex_unlock(&g_nmm_mtx);
-      return nmm_dedicated(cache, asz, bo, offset);  // slab alloc failed -> dedicated
-    }
-    s = &g_nmm_slabs[g_nmm_nslabs++];
-    s->cache = cache; s->bo = nb; s->size = NMM_SLAB_BYTES; s->cur = 0;
-  }
-  uint64_t off = s->cur;
-  s->cur += asz;
-  void *slab_bo = s->bo;
-  pthread_mutex_unlock(&g_nmm_mtx);
-
-  if (bo) nouveau_bo_ref(slab_bo, bo);   // *bo = slab_bo (refcount++), as stock does
-  if (offset) *offset = (uint32_t)off;
-
-  void **h = (void **)malloc(24);        // layout = struct nouveau_mm_allocation
-  if (h) { h[0] = NULL; h[1] = s; *(uint32_t *)((char *)h + 16) = (uint32_t)off; }
-  return h;
-}
-
-void __wrap_nouveau_mm_free(void *handle) {
-  // slabs are never freed; just release the handle
-  if (handle) free(handle);
-}
-
-// nouveau_mm_free_work is an intra-object alias that bypasses --wrap, so wrap it
-// too to keep deferred frees of our handles away from mesa's stock free.
-void __wrap_nouveau_mm_free_work(void *handle) {
-  if (handle) free(handle);
-}
-
 // The world load creates thousands of buffers/textures without presenting, so
 // mesa never flushes; force a periodic submit to bound the nouveau bo-list.
 static void gl_load_drain(void) {
@@ -522,25 +439,21 @@ int pthread_once_fake(volatile int *once_control, void (*init_routine) (void)) {
   return 0;
 }
 
-// Each pthread_create'd thread needs a fake stack-guard TLS block in TPIDR_EL0
-// (see hooks/game.c): libnx leaves TPIDR_EL0 zero on new threads, so a guarded
-// function would fault reading its cookie at [TPIDR_EL0, #0x28].
 typedef struct {
   void *(*func)(void *);
   void *arg;
-  uint8_t tls[0x100];
 } PthreadStart;
 
 static void *pthread_trampoline(void *p) {
   PthreadStart *s = p;
   void *(*func)(void *) = s->func;
   void *arg = s->arg;
+  free(s);
   // OS_ThreadLaunch threads (audio/stream) share core 2 (logic=0, render=1)
   set_thread_core(2);
   thread_registry_add();            // track for freeze-on-exit
-  memset(s->tls, 0, sizeof(s->tls));
-  armSetTlsRw(s->tls);
-  // tls stays in TPIDR_EL0 for the thread's lifetime, so PthreadStart is leaked
+  if (!game_tls_install())
+    return (void *)-1;
   return func(arg);
 }
 
@@ -552,7 +465,8 @@ int pthread_create_fake(pthread_t *thread, const void *unused, void *entry, void
   s->func = (void *(*)(void *))entry;
   s->arg = arg;
   int rc = pthread_create(thread, NULL, pthread_trampoline, s);
-  debugPrintf("pthread_create_fake: entry=%p arg=%p -> rc=%d\n", entry, arg, rc);
+  if (rc != 0)
+    free(s);
   return rc;
 }
 
